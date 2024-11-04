@@ -18,9 +18,6 @@ from kneed import KneeLocator
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 
-# Ensure plots are rendered inline if using Jupyter Notebook
-# %matplotlib inline  # Uncomment if using Jupyter Notebook
-
 # ------------------------ Configuration ------------------------
 
 # Load spaCy Greek language model
@@ -33,7 +30,7 @@ except OSError:
     nlp = spacy.load('el_core_news_sm')
 
 # Define the path to the folder containing the .txt files
-folder_path = '/content'  # Replace with your folder path
+folder_path = '/src'  
 
 # Define model parameters
 max_tokens = 128  # Maximum number of tokens per chunk
@@ -434,7 +431,7 @@ def main():
 
     # ------------------------ Visualization ------------------------
 
-    # Optional: Visualize the clusters using t-SNE
+    # Visualize the clusters using t-SNE
     try:
         print("\nGenerating t-SNE visualization...")
         num_samples = len(embeddings)
@@ -468,9 +465,8 @@ def main():
         print(f"Error during t-SNE visualization: {e}")
         print("Adjust the perplexity parameter to be less than the number of samples.")
 
-    # ------------------------ Similarity Search Example ------------------------
+    # ------------------------ Similarity Search ------------------------
 
-    # Example similarity search
     print("\nPerforming an example similarity search...")
     example_query = "Εισαγωγικό κείμενο για αναζήτηση."  # Replace with your query in Greek
     query_embedding = model.encode([example_query], convert_to_tensor=False)[0]
