@@ -538,7 +538,7 @@ def main():
 
     try:
         print("\nPerforming an example similarity search...")
-        example_query = "Εισαγωγικό κείμενο για αναζήτηση."  # Replace with your query in Greek
+        example_query = "Πότε πρέπει να υποβάλω αίτηση για άδεια μητρότητας ή πατρότητας;  "  # Replace with your query in Greek
         query_embedding = model.encode([example_query], convert_to_tensor=False)[0]
 
         print("Query embedding generated. Performing search...")
@@ -549,6 +549,8 @@ def main():
             top_k=5
         )
         print("Similarity search completed.")
+
+        print(f"\nQuery: {example_query}")
 
         if similar_passages:
             print("\nTop 5 similar passages:")
