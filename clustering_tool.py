@@ -17,6 +17,7 @@ import csv
 from kneed import KneeLocator
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
+import uuid  # For generating unique IDs if needed
 
 # ------------------------ Configuration ------------------------
 
@@ -30,7 +31,7 @@ except OSError:
     nlp = spacy.load('el_core_news_sm')
 
 # Define the path to the folder containing the .txt files
-folder_path = '/src'  
+folder_path = '/Users/aris/HR_Policy_Assignment/src'  
 
 # Define model parameters
 max_tokens = 128  # Maximum number of tokens per chunk
@@ -186,21 +187,37 @@ def read_and_split_documents(folder_path):
             print(f"Error reading file {file_path}: {e}")
     return documents
 
-def initialize_qdrant(client, collection_name, vector_size, distance_metric="Cosine"):
+def initialize_qdrant(client, collection_name, vector_size, distance_metric="Cosine", recreate=False):
     """
-    Initializes a Qdrant collection. Creates it if it doesn't exist.
+    Initializes a Qdrant collection. Creates it if it doesn't exist or recreates it if specified.
 
     Parameters:
     - client (QdrantClient): The Qdrant client instance.
     - collection_name (str): Name of the collection.
     - vector_size (int): Dimension of the vector embeddings.
     - distance_metric (str): Distance metric to use ('Cosine', 'Euclidean', etc.).
+    - recreate (bool): If True, deletes existing collection and creates a new one.
 
     Returns:
     - None
     """
     existing_collections = client.get_collections().collections
-    if collection_name not in [col.name for col in existing_collections]:
+    if collection_name in [col.name for col in existing_collections]:
+        if recreate:
+            print(f"Recreating Qdrant collection '{collection_name}'.")
+            client.delete_collection(collection_name=collection_name)
+            print(f"Deleted existing collection '{collection_name}'.")
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=qmodels.VectorParams(
+                    size=vector_size,
+                    distance=distance_metric
+                )
+            )
+            print(f"Created new collection '{collection_name}'.")
+        else:
+            print(f"Qdrant collection '{collection_name}' already exists.")
+    else:
         print(f"Creating Qdrant collection '{collection_name}' with vector size {vector_size} and distance metric '{distance_metric}'.")
         client.create_collection(
             collection_name=collection_name,
@@ -209,8 +226,6 @@ def initialize_qdrant(client, collection_name, vector_size, distance_metric="Cos
                 distance=distance_metric
             )
         )
-    else:
-        print(f"Qdrant collection '{collection_name}' already exists.")
 
 def upsert_embeddings_qdrant(client, collection_name, embeddings, metadata, payload_fields):
     """
@@ -228,10 +243,27 @@ def upsert_embeddings_qdrant(client, collection_name, embeddings, metadata, payl
     """
     points = []
     for idx, (embedding, meta) in enumerate(zip(embeddings, metadata)):
-        payload = {field: meta[field] for field in payload_fields}
-        points.append(qmodels.PointStruct(id=idx, vector=embedding, payload=payload))
-    client.upsert(collection_name=collection_name, points=points)
-    print(f"Upserted {len(points)} points into Qdrant collection '{collection_name}'.")
+        try:
+            payload = {field: meta[field] for field in payload_fields}
+        except KeyError as e:
+            print(f"Missing key in metadata: {e}. Skipping this entry.")
+            continue
+        
+        # Convert embedding to list if it's a NumPy array
+        if isinstance(embedding, np.ndarray):
+            vector = embedding.tolist()
+        elif isinstance(embedding, list):
+            vector = embedding
+        else:
+            vector = list(embedding)  # Fallback to list conversion
+
+        points.append(qmodels.PointStruct(id=idx, vector=vector, payload=payload))
+    
+    if points:
+        client.upsert(collection_name=collection_name, points=points)
+        print(f"Upserted {len(points)} points into Qdrant collection '{collection_name}'.")
+    else:
+        print("No valid points to upsert.")
 
 def perform_similarity_search(client, collection_name, query_embedding, top_k=5):
     """
@@ -278,7 +310,8 @@ def main():
             passages.append(chunk)
             metadata.append({
                 'document': os.path.basename(doc_name),
-                'passage_index': idx
+                'passage_index': idx,
+                'passage': chunk  # Ensure 'passage' is included
             })
 
     print(f"\nTotal number of passages: {len(passages)}")
@@ -295,7 +328,12 @@ def main():
     apply_pca = True  # Set to False if you do not want to apply PCA
     if apply_pca:
         print("\nApplying PCA to reduce dimensionality...")
-        pca = PCA(n_components=50, random_state=42)
+        # Dynamically set n_components based on the data
+        n_samples = len(embeddings)
+        n_features = len(embeddings[0])
+        max_components = min(50, n_samples, n_features)
+        print(f"Setting n_components to {max_components} (min(50, {n_samples}, {n_features}))")
+        pca = PCA(n_components=max_components, random_state=42)
         reduced_embeddings = pca.fit_transform(embeddings)
         clustering_data = reduced_embeddings
     else:
@@ -307,7 +345,7 @@ def main():
     K = range(2, min(11, len(passages) // 2 + 1))  # Fixed upper limit to avoid high K
 
     for k in K:
-        kmeans_model = KMeans(n_clusters=k, random_state=42)
+        kmeans_model = KMeans(n_clusters=k, random_state=42, n_init=10)  # Set n_init explicitly
         kmeans_model.fit(clustering_data)
         distortions.append(kmeans_model.inertia_)
 
@@ -317,6 +355,7 @@ def main():
     plt.xlabel('Number of clusters')
     plt.ylabel('Distortion')
     plt.title('Elbow Method for Optimal k')
+    plt.savefig('elbow_method.png')  # Save the plot
     plt.show()
 
     # Use KneeLocator to find the elbow point
@@ -325,7 +364,11 @@ def main():
 
     if optimal_clusters_elbow is None:
         print("Elbow point not detected automatically.")
-        optimal_clusters_elbow = int(input("Enter the optimal number of clusters based on the Elbow Method plot: "))
+        try:
+            optimal_clusters_elbow = int(input("Enter the optimal number of clusters based on the Elbow Method plot: "))
+        except ValueError:
+            print("Invalid input. Setting optimal_clusters_elbow to 4.")
+            optimal_clusters_elbow = 4  # Default value
     else:
         print(f"Optimal number of clusters detected by Elbow Method: {optimal_clusters_elbow}")
 
@@ -333,7 +376,7 @@ def main():
     print("\nCalculating silhouette scores for different values of K...")
     silhouette_scores = []
     for k in K:
-        kmeans_model = KMeans(n_clusters=k, random_state=42)
+        kmeans_model = KMeans(n_clusters=k, random_state=42, n_init=10)  # Set n_init explicitly
         labels = kmeans_model.fit_predict(clustering_data)
         score = silhouette_score(clustering_data, labels)
         silhouette_scores.append(score)
@@ -344,6 +387,7 @@ def main():
     plt.xlabel('Number of clusters')
     plt.ylabel('Silhouette Score')
     plt.title('Silhouette Scores for Different k')
+    plt.savefig('silhouette_scores.png')  # Save the plot
     plt.show()
 
     # Determine the best K based on silhouette score
@@ -364,7 +408,7 @@ def main():
 
     # Perform KMeans clustering with the final number of clusters
     print(f"\nClustering embeddings into {final_k} clusters...")
-    clustering_model = KMeans(n_clusters=final_k, random_state=42)
+    clustering_model = KMeans(n_clusters=final_k, random_state=42, n_init=10)  # Set n_init explicitly
     clustering_model.fit(clustering_data)
     cluster_assignments = clustering_model.labels_
 
@@ -411,13 +455,20 @@ def main():
     vector_size = len(embeddings[0])
 
     # Initialize Qdrant collection
-    initialize_qdrant(client, qdrant_collection_name, vector_size, distance_metric="Cosine")
+    # Set recreate=True if you want to delete and recreate the collection
+    initialize_qdrant(
+        client,
+        qdrant_collection_name,
+        vector_size,
+        distance_metric="Cosine",
+        recreate=False  # Set to True if you want to recreate the collection
+    )
 
     # Prepare payload fields
     payload_fields = ['passage', 'document', 'passage_index', 'cluster']
 
     # Combine embeddings and metadata
-    combined_metadata = metadata  # Each entry has 'document', 'passage_index', 'cluster'
+    combined_metadata = metadata  # Each entry has 'document', 'passage_index', 'passage', 'cluster'
 
     # Upsert embeddings into Qdrant
     print("\nUpserting embeddings and metadata into Qdrant...")
@@ -442,7 +493,12 @@ def main():
             perplexity = min(30, num_samples - 1)
             print(f"Using perplexity={perplexity}")
 
-            tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, n_iter=1000)
+            tsne = TSNE(
+                n_components=2,
+                perplexity=perplexity,
+                random_state=42,
+                n_iter=1000
+            )
             embeddings_2d = tsne.fit_transform(clustering_data)
 
             # Create a DataFrame for plotting
@@ -454,10 +510,23 @@ def main():
 
             # Plot the clusters
             plt.figure(figsize=(12, 8))
-            sns.scatterplot(data=df, x='x', y='y', hue='Cluster', style='Document', palette='tab10', s=100)
+            sns.scatterplot(
+                data=df,
+                x='x',
+                y='y',
+                hue='Cluster',
+                style='Document',
+                palette='tab10',
+                s=100
+            )
             plt.title('t-SNE Visualization of Clusters')
             plt.legend(title='Cluster', bbox_to_anchor=(1.05, 1), loc='upper left')
             plt.tight_layout()
+
+            # Save the plot to a file
+            plt.savefig('tsne_clusters.png')  # Saves the plot as a PNG file
+
+            # Optionally, display the plot
             plt.show()
     except ImportError:
         print("t-SNE visualization requires scikit-learn. Visualization skipped.")
@@ -467,24 +536,32 @@ def main():
 
     # ------------------------ Similarity Search ------------------------
 
-    print("\nPerforming an example similarity search...")
-    example_query = "Εισαγωγικό κείμενο για αναζήτηση."  # Replace with your query in Greek
-    query_embedding = model.encode([example_query], convert_to_tensor=False)[0]
+    try:
+        print("\nPerforming an example similarity search...")
+        example_query = "Εισαγωγικό κείμενο για αναζήτηση."  # Replace with your query in Greek
+        query_embedding = model.encode([example_query], convert_to_tensor=False)[0]
 
-    similar_passages = perform_similarity_search(
-        client=client,
-        collection_name=qdrant_collection_name,
-        query_embedding=query_embedding,
-        top_k=5
-    )
+        print("Query embedding generated. Performing search...")
+        similar_passages = perform_similarity_search(
+            client=client,
+            collection_name=qdrant_collection_name,
+            query_embedding=query_embedding,
+            top_k=5
+        )
+        print("Similarity search completed.")
 
-    print("\nTop 5 similar passages:")
-    for idx, passage in enumerate(similar_passages, 1):
-        print(f"\nRank {idx}:")
-        print(f"Score: {passage['score']:.4f}")
-        print(f"Document: {passage['document']}")
-        print(f"Passage Index: {passage['passage_index']}")
-        print(f"Passage: {passage['passage']}")
+        if similar_passages:
+            print("\nTop 5 similar passages:")
+            for idx, passage in enumerate(similar_passages, 1):
+                print(f"\nRank {idx}:")
+                print(f"Score: {passage['score']:.4f}")
+                print(f"Document: {passage['document']}")
+                print(f"Passage Index: {passage['passage_index']}")
+                print(f"Passage: {passage['passage']}")
+        else:
+            print("No similar passages found.")
+    except Exception as e:
+        print(f"An error occurred during similarity search: {e}")
 
 # ------------------------ Execute Pipeline ------------------------
 
