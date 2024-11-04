@@ -20,7 +20,7 @@ from qdrant_client.http import models as qmodels
 
 # ------------------------ Configuration ------------------------
 
-# Load spaCy Greek language model
+# Load Greek language model
 try:
     nlp = spacy.load('el_core_news_sm')
 except OSError:

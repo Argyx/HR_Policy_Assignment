@@ -70,7 +70,7 @@ pip install -r requirements.txt
 python -m spacy download el_core_news_sm
 ```
 
-**If a `requirements.txt` is not provided, install the necessary libraries manually:**
+**If a `requirements.txt` is not working, install the necessary libraries manually:**
 
 ```bash
 pip install spacy sentence-transformers scikit-learn transformers kneed pandas matplotlib seaborn tqdm qdrant-client
