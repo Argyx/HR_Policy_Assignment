@@ -1,55 +1,60 @@
-# Import necessary libraries
-import os
-import glob
-import re  # For regex-based text splitting
-from tqdm import tqdm
-from sentence_transformers import SentenceTransformer
-from sklearn.cluster import KMeans
-from sklearn.manifold import TSNE
-from transformers import AutoTokenizer
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-import csv
-from kneed import KneeLocator
-from qdrant_client import QdrantClient
-from qdrant_client.http import models as qmodels
-import html  # For escaping HTML content
-from sklearn.metrics.pairwise import cosine_similarity
-import nltk  # For stopwords
-from nltk.corpus import stopwords
+# ------------------------ Import Necessary Libraries ------------------------
 
-# Download necessary NLTK data if not already downloaded
+import os  # For interacting with the operating system
+import glob  # For file pattern matching
+import re  # For regex-based text splitting
+from tqdm import tqdm  # For progress bars
+from sentence_transformers import SentenceTransformer  # For generating embeddings
+from sklearn.cluster import KMeans  # For clustering embeddings
+from sklearn.manifold import TSNE  # For dimensionality reduction in visualization
+from transformers import AutoTokenizer  # For tokenizing text
+import numpy as np  # For numerical operations
+import pandas as pd  # For data manipulation
+import matplotlib.pyplot as plt  # For plotting graphs
+import seaborn as sns  # For statistical data visualization
+import csv  # For writing CSV files
+from kneed import KneeLocator  # For detecting the 'elbow' in the elbow method
+from qdrant_client import QdrantClient  # For interacting with Qdrant vector database
+from qdrant_client.http import models as qmodels  # For Qdrant data models
+import html  # For escaping HTML content in strings
+from sklearn.metrics.pairwise import cosine_similarity  # For computing similarity between vectors
+import nltk  # For natural language processing tasks
+from nltk.corpus import stopwords  # For accessing stopwords
+
+# ------------------------ NLTK Setup ------------------------
+
+# Download the 'stopwords' dataset from NLTK if not already present
 nltk.download('stopwords')
 
 # ------------------------ Configuration ------------------------
 
-# Define the path to the folder containing the .txt files
+# Define the path to the folder containing the .txt files to process
 folder_path = 'data'
 
 # Define model parameters
-max_tokens = 128  # Maximum number of tokens per chunk, aligned with model's max_seq_length
+max_tokens = 128  # Maximum number of tokens per text chunk, aligned with the model's max sequence length
 
-# Initialize the tokenizer associated with the pre-trained model
+# Initialize the tokenizer associated with the pre-trained embedding model
 tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
 
-# Initialize the SentenceTransformer model for generating embeddings
+# Initialize the SentenceTransformer model for generating text embeddings
 model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
 
-# Qdrant Configuration for vector database
-qdrant_host = 'localhost'  # Qdrant host
-qdrant_port = 6333         # Qdrant port
-qdrant_collection_name = 'text_clusters'  # Name of the collection in Qdrant
+# Qdrant Configuration for vector database connection
+qdrant_host = 'localhost'  # Host address for Qdrant
+qdrant_port = 6333         # Port number for Qdrant
+qdrant_collection_name = 'text_clusters'  # Name of the collection in Qdrant to store vectors
 
-# Get Greek stopwords and enhance the list
+# Get Greek stopwords from NLTK and create a set for faster lookup
 greek_stopwords = set(stopwords.words('greek'))
-# Add additional common words to the stopwords set
-additional_stopwords = {'ένα', 'πριν', 'από', 'προς', 'τους', 'στην', 'στις', 'της', 'του', 'μεταξύ', 'ή', 'και'}
+
+# Add additional common Greek words to the stopwords set
+additional_stopwords = {
+    'ένα', 'πριν', 'από', 'προς', 'τους', 'στην', 'στις', 'της', 'του', 'μεταξύ', 'ή', 'και'
+}
 greek_stopwords.update(additional_stopwords)
 
-# ------------------------ Functions ------------------------
-
+# ------------------------ Function Definitions ------------------------
 
 def split_text_into_chunks(text, max_tokens=128):
     """
@@ -65,57 +70,41 @@ def split_text_into_chunks(text, max_tokens=128):
     Returns:
     - chunks (list): A list of text chunks.
     """
-    # Split text into sentences using regex that matches sentence-ending punctuation
+    # Use regex to split the text into sentences at punctuation followed by whitespace
     sentences = re.split(r'(?<=[.!?])\s+', text)
-    # Initialize an empty list to store the chunks
-    chunks = []
-    # Initialize variables for the current chunk and its token count
-    current_chunk = []
-    current_chunk_tokens = 0
+    chunks = []  # List to store the resulting chunks
+    current_chunk = []  # List to accumulate sentences for the current chunk
+    current_chunk_tokens = 0  # Counter for tokens in the current chunk
 
-    # Initialize a counter for the sentences
-    i = 0
-    # Loop through all sentences
+    i = 0  # Index for iterating over sentences
     while i < len(sentences):
-        # Get the current sentence and strip leading/trailing whitespace
-        sentence = sentences[i].strip()
-        # Tokenize the sentence using the tokenizer
+        sentence = sentences[i].strip()  # Get the current sentence and strip whitespace
+        # Tokenize the sentence without adding special tokens
         sentence_tokens = tokenizer.encode(sentence, add_special_tokens=False)
-        # Get the number of tokens in the sentence
-        sentence_token_count = len(sentence_tokens)
+        sentence_token_count = len(sentence_tokens)  # Count the tokens in the sentence
 
-        # Check if adding this sentence would exceed the max_tokens limit
+        # Check if adding the sentence exceeds the max_tokens limit
         if current_chunk_tokens + sentence_token_count <= max_tokens:
-            # Add the sentence to the current chunk
-            current_chunk.append(sentence)
-            # Update the token count
-            current_chunk_tokens += sentence_token_count
-            # Move to the next sentence
-            i += 1
+            current_chunk.append(sentence)  # Add sentence to the current chunk
+            current_chunk_tokens += sentence_token_count  # Update token count
+            i += 1  # Move to the next sentence
         else:
-            # If the current chunk is not empty, finalize it
             if current_chunk:
-                # Join the sentences in the current chunk into a single string
+                # Finalize the current chunk by joining sentences
                 chunk_text = ' '.join(current_chunk).strip()
-                # Remove leading/trailing periods and whitespace
-                chunk_text = chunk_text.strip('.').strip()
-                # Add the chunk to the list of chunks
-                chunks.append(chunk_text)
-                # Reset the current chunk and token count
-                current_chunk = []
-                current_chunk_tokens = 0
+                chunk_text = chunk_text.strip('.').strip()  # Remove leading/trailing periods and whitespace
+                chunks.append(chunk_text)  # Add the chunk to the list
+                current_chunk = []  # Reset the current chunk
+                current_chunk_tokens = 0  # Reset the token count
             else:
-                # If a single sentence exceeds max_tokens, handle it separately
+                # Handle single sentences that exceed max_tokens
                 print(f"Warning: A single sentence exceeds max_tokens limit: {sentence[:50]}...")
                 # Split the long sentence into smaller parts
                 sub_sentences = split_long_sentence(sentence, max_tokens)
-                # Add the sub-sentences to the chunks
-                chunks.extend(sub_sentences)
-                # Move to the next sentence
-                i += 1
-                # Reset the current chunk and token count
-                current_chunk = []
-                current_chunk_tokens = 0
+                chunks.extend(sub_sentences)  # Add sub-sentences to the chunks list
+                i += 1  # Move to the next sentence
+                current_chunk = []  # Reset the current chunk
+                current_chunk_tokens = 0  # Reset the token count
 
     # Add any remaining sentences as the last chunk
     if current_chunk:
@@ -123,9 +112,7 @@ def split_text_into_chunks(text, max_tokens=128):
         chunk_text = chunk_text.strip('.').strip()
         chunks.append(chunk_text)
 
-    # Return the list of chunks
-    return chunks
-
+    return chunks  # Return the list of chunks
 
 def split_long_sentence(sentence, max_tokens):
     """
@@ -138,52 +125,42 @@ def split_long_sentence(sentence, max_tokens):
     Returns:
     - sub_chunks (list): A list of smaller sentence chunks.
     """
-    # Initialize a list to store the sub-chunks
-    sub_chunks = []
+    sub_chunks = []  # List to store the sub-chunks
     # Define punctuation marks to split on
     punctuation = [".", ",", ";", ":", "-", "–", "—", "(", ")", "\"", "'"]
-    # Initialize variables
-    sub_sentences = []
-    current_sub = ""
+    sub_sentences = []  # List to store sub-sentences
+    current_sub = ""  # Current substring being built
+
     # Iterate over each character in the sentence
     for char in sentence:
-        current_sub += char
-        # If the character is a punctuation mark, split here
+        current_sub += char  # Add character to current substring
         if char in punctuation:
+            # If character is punctuation, split here
             sub_sentences.append(current_sub.strip())
-            current_sub = ""
-    # Add any remaining text as a sub-sentence
+            current_sub = ""  # Reset current substring
     if current_sub:
-        sub_sentences.append(current_sub.strip())
+        sub_sentences.append(current_sub.strip())  # Add any remaining text
 
     # Further split the sub-sentences if necessary
     for sub in sub_sentences:
-        # Tokenize the sub-sentence
         tokens = tokenizer.encode(sub, add_special_tokens=False)
-        # If the sub-sentence is within the token limit, add it to sub_chunks
         if len(tokens) <= max_tokens:
-            sub_chunks.append(sub)
+            sub_chunks.append(sub)  # Add sub-sentence to sub-chunks
         else:
-            # Split the sub-sentence by whitespace as a last resort
+            # Split the sub-sentence by words if still too long
             words = sub.split()
-            temp = ""
+            temp = ""  # Temporary string to build up words
             for word in words:
-                # Tokenize the word
-                word_tokens = tokenizer.encode(word, add_special_tokens=False)
-                # Check if adding the word exceeds the max_tokens limit
+                # Check if adding the word exceeds max_tokens
                 if len(tokenizer.encode(temp + " " + word, add_special_tokens=False)) <= max_tokens:
                     temp = temp + " " + word if temp else word
                 else:
-                    # Add the accumulated words as a sub-chunk
                     if temp:
-                        sub_chunks.append(temp)
-                    temp = word
-            # Add any remaining words as a sub-chunk
+                        sub_chunks.append(temp)  # Add accumulated words as a sub-chunk
+                    temp = word  # Start a new sub-chunk with the current word
             if temp:
-                sub_chunks.append(temp)
-    # Return the list of sub-chunks
-    return sub_chunks
-
+                sub_chunks.append(temp)  # Add any remaining words as a sub-chunk
+    return sub_chunks  # Return the list of sub-chunks
 
 def read_and_split_documents(folder_path):
     """
@@ -195,35 +172,29 @@ def read_and_split_documents(folder_path):
     Returns:
     - documents (dict): A dictionary mapping file paths to lists of text chunks.
     """
-    # Initialize a dictionary to store documents and their chunks
-    documents = {}
+    documents = {}  # Dictionary to store file paths and their chunks
     # Get a list of all .txt files in the folder
     txt_files = glob.glob(os.path.join(folder_path, '*.txt'))
     print(f"Found {len(txt_files)} .txt files: {txt_files}")
-    # Check if any .txt files were found
     if len(txt_files) == 0:
         print("No .txt files found in the specified folder.")
-    # Loop through each file
+
+    # Process each file
     for file_path in txt_files:
         print(f"\nProcessing file: {file_path}")
         try:
-            # Open and read the file with UTF-8 encoding
             with open(file_path, 'r', encoding='utf-8') as f:
-                text = f.read()
-                # Check if the file is empty
+                text = f.read()  # Read the entire file content
                 if not text.strip():
                     print(f"Warning: The file {file_path} is empty.")
                 else:
                     # Split the text into chunks
                     chunks = split_text_into_chunks(text, max_tokens)
                     print(f"Number of chunks created from {file_path}: {len(chunks)}")
-                    # Store the chunks in the documents dictionary
-                    documents[file_path] = chunks
+                    documents[file_path] = chunks  # Add chunks to the documents dictionary
         except Exception as e:
             print(f"Error reading file {file_path}: {e}")
-    # Return the documents dictionary
-    return documents
-
+    return documents  # Return the documents dictionary
 
 def initialize_qdrant(client, collection_name, vector_size, distance_metric="Cosine", recreate=False):
     """
@@ -245,10 +216,9 @@ def initialize_qdrant(client, collection_name, vector_size, distance_metric="Cos
     if collection_name in [col.name for col in existing_collections]:
         if recreate:
             print(f"Recreating Qdrant collection '{collection_name}'.")
-            # Delete the existing collection
-            client.delete_collection(collection_name=collection_name)
+            client.delete_collection(collection_name=collection_name)  # Delete existing collection
             print(f"Deleted existing collection '{collection_name}'.")
-            # Create a new collection with the specified parameters
+            # Create a new collection with specified vector size and distance metric
             client.create_collection(
                 collection_name=collection_name,
                 vectors_config=qmodels.VectorParams(
@@ -260,8 +230,8 @@ def initialize_qdrant(client, collection_name, vector_size, distance_metric="Cos
         else:
             print(f"Qdrant collection '{collection_name}' already exists.")
     else:
+        # Create a new collection if it doesn't exist
         print(f"Creating Qdrant collection '{collection_name}' with vector size {vector_size} and distance metric '{distance_metric}'.")
-        # Create the collection
         client.create_collection(
             collection_name=collection_name,
             vectors_config=qmodels.VectorParams(
@@ -269,7 +239,6 @@ def initialize_qdrant(client, collection_name, vector_size, distance_metric="Cos
                 distance=distance_metric
             )
         )
-
 
 def upsert_embeddings_qdrant(client, collection_name, embeddings, metadata, payload_fields):
     """
@@ -285,27 +254,25 @@ def upsert_embeddings_qdrant(client, collection_name, embeddings, metadata, payl
     Returns:
     - None
     """
-    # Initialize a list to store the points to upsert
-    points = []
-    # Loop through each embedding and its metadata
+    points = []  # List to store the points to be upserted
     for idx, (meta, vector) in enumerate(zip(metadata, embeddings)):
-        # Use an unsigned integer as the point ID
-        point_id = idx  # or idx + 1 if you want to start from 1
+        point_id = idx  # Unique point ID (can be adjusted if needed)
 
-        # Include the unique identifier in the payload
+        # Create a unique identifier combining document name and passage index
         unique_id = f"{meta['document']}_{meta['passage_index']}"
+        # Prepare the payload with specified fields and unique ID
         payload = {field: meta[field] for field in payload_fields}
-        payload['unique_id'] = unique_id  # Add the unique ID to the payload
+        payload['unique_id'] = unique_id  # Add unique ID to payload
 
-        # Convert the embedding to a list if it's a NumPy array
+        # Ensure the embedding vector is in list format
         if isinstance(vector, np.ndarray):
             vector = vector.tolist()
         elif isinstance(vector, list):
             vector = vector
         else:
-            vector = list(vector)  # Fallback to list conversion
+            vector = list(vector)  # Convert to list as a fallback
 
-        # Create a point structure with the embedding and payload
+        # Create a PointStruct object with the point ID, vector, and payload
         points.append(qmodels.PointStruct(id=point_id, vector=vector, payload=payload))
 
     # Upsert the points into the Qdrant collection
@@ -314,7 +281,6 @@ def upsert_embeddings_qdrant(client, collection_name, embeddings, metadata, payl
         print(f"Upserted {len(points)} points into Qdrant collection '{collection_name}'.")
     else:
         print("No valid points to upsert.")
-
 
 def perform_similarity_search(client, collection_name, query_embedding, top_k=5):
     """
@@ -344,23 +310,20 @@ def perform_similarity_search(client, collection_name, query_embedding, top_k=5)
         limit=top_k,
         with_payload=True
     )
-    # Initialize a list to store the results
-    results = []
-    # Loop through each search result
+
+    results = []  # List to store search results
     for hit in search_result:
         result = {
-            'id': hit.id,  # Point ID as an integer
-            'score': hit.score,
-            'passage': hit.payload.get('passage'),
-            'document': hit.payload.get('document'),
-            'passage_index': hit.payload.get('passage_index'),
-            'cluster': hit.payload.get('cluster'),
-            'unique_id': hit.payload.get('unique_id')  # Retrieve the unique ID from payload
+            'id': hit.id,  # Point ID
+            'score': hit.score,  # Similarity score
+            'passage': hit.payload.get('passage'),  # Retrieved passage text
+            'document': hit.payload.get('document'),  # Document name
+            'passage_index': hit.payload.get('passage_index'),  # Index of the passage in the document
+            'cluster': hit.payload.get('cluster'),  # Cluster assignment
+            'unique_id': hit.payload.get('unique_id')  # Unique identifier
         }
         results.append(result)
-    # Return the list of results
-    return results
-
+    return results  # Return the list of results
 
 def highlight_similar_text_using_model(query, passage, model, stopwords_set, threshold=0.7):
     """
@@ -380,29 +343,29 @@ def highlight_similar_text_using_model(query, passage, model, stopwords_set, thr
     query_tokens = re.findall(r'\b\w+\b', query.lower())
     passage_tokens = passage.split()
 
-    # Filter out stopwords
+    # Filter out stopwords from query and passage tokens
     query_tokens_filtered = [word for word in query_tokens if word not in stopwords_set]
     passage_tokens_filtered = [word for word in passage_tokens if re.sub(r'[^\w\s]', '', word).lower() not in stopwords_set]
 
-    # Get unique passage tokens
+    # Get unique tokens from the passage
     unique_passage_tokens = list(set(passage_tokens_filtered))
 
+    # Return the original passage if no tokens are left after filtering
     if not query_tokens_filtered or not unique_passage_tokens:
-        # If there are no tokens to compare, return the original passage
         return html.escape(passage)
 
-    # Encode the query and passage tokens
+    # Encode the tokens using the model
     query_embeddings = model.encode(query_tokens_filtered, convert_to_tensor=True)
     passage_embeddings = model.encode(unique_passage_tokens, convert_to_tensor=True)
 
-    # Move tensors to CPU if necessary
+    # Move embeddings to CPU if necessary
     query_embeddings = query_embeddings.cpu()
     passage_embeddings = passage_embeddings.cpu()
 
-    # Compute cosine similarities
+    # Compute cosine similarities between query and passage tokens
     similarities = cosine_similarity(query_embeddings.numpy(), passage_embeddings.numpy())
 
-    # Find tokens with similarity above the threshold
+    # Identify tokens in the passage that are similar to the query tokens
     similar_tokens = set()
     for i, query_word in enumerate(query_tokens_filtered):
         for j, passage_word in enumerate(unique_passage_tokens):
@@ -412,16 +375,15 @@ def highlight_similar_text_using_model(query, passage, model, stopwords_set, thr
     # Highlight similar tokens in the passage
     highlighted_words = []
     for word in passage_tokens:
-        word_clean = re.sub(r'[^\w\s]', '', word)
+        word_clean = re.sub(r'[^\w\s]', '', word)  # Remove punctuation
         if word_clean.lower() in similar_tokens:
-            highlighted_word = f'<mark>{html.escape(word)}</mark>'
+            highlighted_word = f'<mark>{html.escape(word)}</mark>'  # Highlight word
         else:
-            highlighted_word = html.escape(word)
+            highlighted_word = html.escape(word)  # Escape HTML characters
         highlighted_words.append(highlighted_word)
 
-    highlighted_passage = ' '.join(highlighted_words)
-    return highlighted_passage
-
+    highlighted_passage = ' '.join(highlighted_words)  # Reconstruct the passage
+    return highlighted_passage  # Return the highlighted passage
 
 def retrieve_and_verify_qdrant_data(client, collection_name, original_metadata):
     """
@@ -435,31 +397,29 @@ def retrieve_and_verify_qdrant_data(client, collection_name, original_metadata):
     Returns:
     - None
     """
-    # Initialize the offset for pagination
-    offset = None
-    all_hits = []
+    offset = None  # For pagination
+    all_hits = []  # List to store all retrieved points
 
     while True:
-        # Corrected parameter name from 'scroll' to 'offset'
+        # Retrieve points from Qdrant with pagination
         result, next_page_offset = client.scroll(
             collection_name=collection_name,
             offset=offset,
             limit=100,
             with_payload=True
         )
-        all_hits.extend(result)
+        all_hits.extend(result)  # Add retrieved points to the list
 
         if next_page_offset is None:
-            break
-        offset = next_page_offset
+            break  # Exit if no more points to retrieve
+        offset = next_page_offset  # Update offset for next iteration
 
     # Create a mapping from unique_id to payload
     qdrant_data = {}
     for hit in all_hits:
         qdrant_data[hit.payload['unique_id']] = hit.payload
 
-    # Verify each entry
-    mismatches = []
+    mismatches = []  # List to store any mismatches found
     for meta in original_metadata:
         unique_id = f"{meta['document']}_{meta['passage_index']}"
         if unique_id not in qdrant_data:
@@ -470,6 +430,7 @@ def retrieve_and_verify_qdrant_data(client, collection_name, original_metadata):
         if qdrant_passage != original_passage:
             mismatches.append(f"Mismatch in passage for {unique_id}")
 
+    # Report mismatches or confirm data integrity
     if mismatches:
         print("Found mismatches in Qdrant data:")
         for mismatch in mismatches:
@@ -477,26 +438,25 @@ def retrieve_and_verify_qdrant_data(client, collection_name, original_metadata):
     else:
         print("All passages in Qdrant match the original metadata.")
 
-
 # ------------------------ Main Pipeline ------------------------
 
 def main():
-    # Read and split the documents into chunks
+    # ------------------------ Step 1: Read and Split Documents ------------------------
+
+    # Read all .txt files and split them into chunks
     documents = read_and_split_documents(folder_path)
 
     # Flatten the documents into a list of passages and collect metadata
-    passages = []
-    metadata = []
-    # Loop through each document and its chunks
+    passages = []  # List to store all passages
+    metadata = []  # List to store metadata for each passage
     for doc_name, chunks in documents.items():
         for idx, chunk in enumerate(chunks):
-            # Add the chunk to the passages list
-            passages.append(chunk)
-            # Collect metadata for the chunk
+            passages.append(chunk)  # Add the passage to the list
+            # Collect metadata for the passage
             metadata.append({
-                'document': os.path.basename(doc_name),
-                'passage_index': idx,
-                'passage': chunk  # Ensure 'passage' is included
+                'document': os.path.basename(doc_name),  # Document name without the path
+                'passage_index': idx,  # Index of the passage in the document
+                'passage': chunk  # The passage text
             })
 
     print(f"\nTotal number of passages: {len(passages)}")
@@ -504,7 +464,9 @@ def main():
     # Check if any passages were extracted
     if len(passages) == 0:
         print("No passages were extracted. Please check the document reading and splitting process.")
-        return
+        return  # Exit the program if no passages
+
+    # ------------------------ Step 2: Encode Passages ------------------------
 
     # Encode the passages into embeddings using the model
     print("\nEncoding passages into embeddings...")
@@ -512,22 +474,19 @@ def main():
     # Convert embeddings to a NumPy array for clustering
     clustering_data = np.array(embeddings)
 
-    # Determine the optimal number of clusters using the Elbow Method
+    # ------------------------ Step 3: Determine Optimal Number of Clusters ------------------------
+
     print("\nDetermining the optimal number of clusters using the Elbow Method...")
-    distortions = []
+    distortions = []  # List to store distortion values
     # Set the maximum number of clusters to try
     max_k = min(30, len(passages) - 1)  # Adjust max_k based on the number of passages
-    # Create a range of cluster counts to try
-    K = range(1, max_k + 1)
+    K = range(1, max_k + 1)  # Range of k values to try
 
-    # Loop through each value of k
     for k in K:
         # Initialize KMeans with k clusters
         kmeans_model = KMeans(n_clusters=k, random_state=42, n_init=10)
-        # Fit the model to the data
-        kmeans_model.fit(clustering_data)
-        # Append the inertia (sum of squared distances) to the distortions list
-        distortions.append(kmeans_model.inertia_)
+        kmeans_model.fit(clustering_data)  # Fit the model to the data
+        distortions.append(kmeans_model.inertia_)  # Append the inertia to distortions
 
     # Plot the elbow curve
     plt.figure(figsize=(8, 4))
@@ -538,42 +497,39 @@ def main():
 
     # Use KneeLocator to find the elbow point
     try:
-        # Initialize the KneeLocator
         knee_locator = KneeLocator(
             K, distortions, curve='convex', direction='decreasing',
             interp_method='interp1d', polynomial_degree=4
         )
-        # Get the elbow point
-        optimal_clusters_elbow = knee_locator.elbow
+        optimal_clusters_elbow = knee_locator.elbow  # Optimal k
 
-        # If an elbow point was detected, annotate it on the plot
         if optimal_clusters_elbow:
+            # Annotate the elbow point on the plot
             plt.vlines(optimal_clusters_elbow, plt.ylim()[0], plt.ylim()[1], linestyles='dashed', colors='red')
-            plt.text(optimal_clusters_elbow + 0.5, distortions[optimal_clusters_elbow - 1], f'k={optimal_clusters_elbow}', color='red')
+            plt.text(optimal_clusters_elbow + 0.5, distortions[optimal_clusters_elbow - 1],
+                     f'k={optimal_clusters_elbow}', color='red')
             print(f"Optimal number of clusters detected by Elbow Method: {optimal_clusters_elbow}")
         else:
-            # If no elbow point was detected, prompt the user to input it
+            # Prompt user input if elbow point not detected
             print("Elbow point not detected automatically.")
             optimal_clusters_elbow = int(input("Enter the optimal number of clusters based on the Elbow Method plot: "))
     except Exception as e:
-        # Handle any errors during elbow detection
+        # Handle errors during elbow detection
         print(f"An error occurred while detecting the elbow point: {e}")
         optimal_clusters_elbow = int(input("Enter the optimal number of clusters based on the Elbow Method plot: "))
 
-    # Save the elbow plot to a file
+    # Save and display the elbow plot
     plt.savefig('elbow_method.png')
-    # Display the elbow plot
     plt.show()
 
-    # Perform KMeans clustering with the optimal number of clusters
-    final_k = optimal_clusters_elbow
+    # ------------------------ Step 4: Perform KMeans Clustering ------------------------
+
+    final_k = optimal_clusters_elbow  # Use the optimal number of clusters
     print(f"\nClustering embeddings into {final_k} clusters...")
     # Initialize KMeans with the final number of clusters
     clustering_model = KMeans(n_clusters=final_k, random_state=42, n_init=10)
-    # Fit the model to the data
-    clustering_model.fit(clustering_data)
-    # Get the cluster assignments for each data point
-    cluster_assignments = clustering_model.labels_
+    clustering_model.fit(clustering_data)  # Fit the model
+    cluster_assignments = clustering_model.labels_  # Get cluster labels
 
     # Update metadata with cluster assignments
     for idx, label in enumerate(cluster_assignments):
@@ -590,14 +546,14 @@ def main():
             'passage_index': metadata[idx]['passage_index']
         })
 
-    # Write the clusters to a CSV file for inspection
+    # ------------------------ Step 5: Write Clusters to CSV ------------------------
+
     output_csv = 'clusters.csv'
     print(f"\nWriting clusters to {output_csv}...")
     with open(output_csv, 'w', encoding='utf-8', newline='') as csvfile:
         fieldnames = ['Cluster', 'Document', 'Passage Index', 'Passage']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        # Loop through each cluster and its passages
         for cluster_id, passages_in_cluster in clusters.items():
             for passage_info in passages_in_cluster:
                 writer.writerow({
@@ -609,14 +565,13 @@ def main():
 
     print("Clusters have been successfully written to the CSV file.")
 
-    # ------------------------ Visualization ------------------------
+    # ------------------------ Step 6: Visualization ------------------------
 
     # Visualize the clusters using t-SNE
     try:
         print("\nGenerating t-SNE visualization...")
         num_samples = len(embeddings)
 
-        # Check if there are enough samples for t-SNE
         if num_samples < 3:
             print("Not enough samples for t-SNE visualization.")
         else:
@@ -632,8 +587,7 @@ def main():
                 n_iter=1000,
                 learning_rate='auto'  # Adjust learning rate automatically
             )
-            # Fit t-SNE to the data and reduce dimensions
-            embeddings_2d = tsne.fit_transform(clustering_data)
+            embeddings_2d = tsne.fit_transform(clustering_data)  # Reduce dimensions
 
             # Create a DataFrame for plotting
             df = pd.DataFrame()
@@ -657,10 +611,8 @@ def main():
             plt.legend(title='Cluster', bbox_to_anchor=(1.05, 1), loc='upper left')
             plt.tight_layout()
 
-            # Save the plot to a file
-            plt.savefig('tsne_clusters.png')  # Saves the plot as a PNG file
-
-            # Display the plot
+            # Save and display the plot
+            plt.savefig('tsne_clusters.png')
             plt.show()
     except ImportError:
         print("t-SNE visualization requires scikit-learn and seaborn. Visualization skipped.")
@@ -668,7 +620,7 @@ def main():
         print(f"Error during t-SNE visualization: {e}")
         print("Adjust the perplexity parameter to be less than the number of samples.")
 
-    # ------------------------ Qdrant Integration ------------------------
+    # ------------------------ Step 7: Qdrant Integration ------------------------
 
     # Initialize Qdrant client for vector database operations
     print("\nInitializing Qdrant client...")
@@ -699,7 +651,8 @@ def main():
         payload_fields=payload_fields
     )
 
-    # Verify passage indices in Qdrant
+    # ------------------------ Step 8: Verify Data in Qdrant ------------------------
+
     print("\nVerifying passage indices in Qdrant...")
     retrieve_and_verify_qdrant_data(
         client=client,
@@ -707,7 +660,7 @@ def main():
         original_metadata=metadata
     )
 
-    # ------------------------ Similarity Search with Model-based Highlighting ------------------------
+    # ------------------------ Step 9: Similarity Search and Highlighting ------------------------
 
     try:
         print("\nPerforming similarity searches for provided phrases and highlighting similar text...")
@@ -721,14 +674,14 @@ def main():
             "Ποια προγράμματα υποστήριξης προσφέρονται για την υγεία και την ευεξία των εργαζομένων;"
         ]
 
-        # Create an HTML report
+        # Create an HTML report to display results
         report_filename = 'similarity_report.html'
         with open(report_filename, 'w', encoding='utf-8') as report_file:
             # Write the header of the HTML file
             report_file.write('<html><head><meta charset="UTF-8"><title>Similarity Report</title></head><body>')
             report_file.write('<h1>Similarity Report</h1>')
 
-            # Loop through each query
+            # Process each query
             for query in queries:
                 report_file.write(f'<h2>Query: {html.escape(query)}</h2>')
                 print(f"\nQuery: {query}")
@@ -748,11 +701,10 @@ def main():
                     top_k=3
                 )
 
-                # Check if any similar passages were found
                 if similar_passages:
                     report_file.write('<ol>')
                     print("\nTop 3 similar passages:")
-                    # Loop through each similar passage
+                    # Process each similar passage
                     for idx, passage in enumerate(similar_passages, 1):
                         # Highlight similar text using the model and stopwords
                         highlighted_passage = highlight_similar_text_using_model(
@@ -760,10 +712,10 @@ def main():
                             passage['passage'],
                             model,
                             greek_stopwords,
-                            threshold=0.7  # Increased threshold
+                            threshold=0.7  # Similarity threshold
                         )
 
-                        # Write to the HTML report
+                        # Write the result to the HTML report
                         report_file.write(f'<li>')
                         report_file.write(f'<p><strong>Rank {idx}</strong></p>')
                         report_file.write(f'<p><strong>Score:</strong> {passage["score"]:.4f}</p>')
@@ -790,8 +742,7 @@ def main():
         print(f"\nSimilarity report generated: {report_filename}")
 
     except Exception as e:
-        print(f"An error occurred during similarity search: {e}")#test
-
+        print(f"An error occurred during similarity search: {e}")
 
 # ------------------------ Execute Pipeline ------------------------
 
