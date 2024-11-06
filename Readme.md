@@ -131,6 +131,43 @@ A t-SNE plot is generated to visualize the distribution of clusters. Each point 
 
 This HTML report is generated for each query, showing the top 3 most similar passages found. Each passage is highlighted to indicate similar content words, based on a configurable similarity threshold.
 
+#### Highlighting Similarity Levels with Colors
+
+In the similarity search results, we have enhanced the highlighting of similar text by introducing different colors to represent different levels of similarity between the query and the passages.
+
+#### How It Works
+The `highlight_similar_text_using_model` function has been updated to assign different colors to words in the passages based on their semantic similarity to the words in the query.
+
+- **Red (>= 0.9)**: Very high similarity. Words that are almost identical or highly related to the query terms.
+- **Orange (>= 0.8)**: High similarity. Words that are strongly related to the query.
+- **Yellow (>= 0.7)**: Moderate similarity. Words that are somewhat related to the query.
+- **Green (>= 0.5)**: Low similarity. Words that have a loose connection to the query.
+
+This color-coded highlighting makes it easier to quickly identify the most relevant parts of each passage in relation to the query.
+
+#### Customizing Thresholds and Colors
+You can adjust the similarity thresholds and corresponding colors in the `highlight_similar_text_using_model` function call within the script. The `thresholds` parameter accepts a list of tuples, each containing a threshold value and a color name.
+
+#### Example:
+```python
+# Custom thresholds and colors
+custom_thresholds = [
+    (0.9, 'red'),       # Very high similarity
+    (0.8, 'orange'),    # High similarity
+    (0.7, 'yellow'),    # Moderate similarity
+    (0.5, 'green')      # Low similarity
+]
+
+# Use the function with custom thresholds
+highlighted_passage = highlight_similar_text_using_model(
+    query,
+    passage['passage'],
+    model,
+    greek_stopwords,
+    thresholds=custom_thresholds
+)
+
+
 #### Structure of `similarity_report.html`
 
 Each query section includes:
