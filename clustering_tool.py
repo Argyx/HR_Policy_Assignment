@@ -17,11 +17,16 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 import html  # For escaping HTML content
 from sklearn.metrics.pairwise import cosine_similarity
+import nltk  # For stopwords
+from nltk.corpus import stopwords
+
+# Download necessary NLTK data if not already downloaded
+nltk.download('stopwords')
 
 # ------------------------ Configuration ------------------------
 
 # Define the path to the folder containing the .txt files
-folder_path = '/Users/aris/HR_Policy_Assignment/src'
+folder_path = 'data'
 
 # Define model parameters
 max_tokens = 128  # Maximum number of tokens per chunk, aligned with model's max_seq_length
@@ -37,7 +42,14 @@ qdrant_host = 'localhost'  # Qdrant host
 qdrant_port = 6333         # Qdrant port
 qdrant_collection_name = 'text_clusters'  # Name of the collection in Qdrant
 
+# Get Greek stopwords and enhance the list
+greek_stopwords = set(stopwords.words('greek'))
+# Add additional common words to the stopwords set
+additional_stopwords = {'ένα', 'πριν', 'από', 'προς', 'τους', 'στην', 'στις', 'της', 'του', 'μεταξύ', 'ή', 'και'}
+greek_stopwords.update(additional_stopwords)
+
 # ------------------------ Functions ------------------------
+
 
 def split_text_into_chunks(text, max_tokens=128):
     """
@@ -45,11 +57,11 @@ def split_text_into_chunks(text, max_tokens=128):
     - Each chunk starts and ends with complete sentences.
     - Chunks do not exceed max_tokens.
     - Handles leading and trailing punctuation and whitespace.
-    
+
     Parameters:
     - text (str): The input text to split.
     - max_tokens (int): Maximum number of tokens per chunk.
-    
+
     Returns:
     - chunks (list): A list of text chunks.
     """
@@ -114,14 +126,15 @@ def split_text_into_chunks(text, max_tokens=128):
     # Return the list of chunks
     return chunks
 
+
 def split_long_sentence(sentence, max_tokens):
     """
     Splits a long sentence into smaller chunks based on punctuation.
-    
+
     Parameters:
     - sentence (str): The sentence to split.
     - max_tokens (int): Maximum number of tokens per chunk.
-    
+
     Returns:
     - sub_chunks (list): A list of smaller sentence chunks.
     """
@@ -171,13 +184,14 @@ def split_long_sentence(sentence, max_tokens):
     # Return the list of sub-chunks
     return sub_chunks
 
+
 def read_and_split_documents(folder_path):
     """
     Reads all .txt files from the specified folder and splits them into chunks.
-    
+
     Parameters:
     - folder_path (str): The path to the folder containing .txt files.
-    
+
     Returns:
     - documents (dict): A dictionary mapping file paths to lists of text chunks.
     """
@@ -210,17 +224,18 @@ def read_and_split_documents(folder_path):
     # Return the documents dictionary
     return documents
 
+
 def initialize_qdrant(client, collection_name, vector_size, distance_metric="Cosine", recreate=False):
     """
     Initializes a Qdrant collection. Creates it if it doesn't exist or recreates it if specified.
-    
+
     Parameters:
     - client (QdrantClient): The Qdrant client instance.
     - collection_name (str): The name of the collection.
     - vector_size (int): The dimension of the vector embeddings.
     - distance_metric (str): The distance metric to use ('Cosine', 'Euclidean', etc.).
     - recreate (bool): If True, deletes the existing collection and creates a new one.
-    
+
     Returns:
     - None
     """
@@ -254,44 +269,45 @@ def initialize_qdrant(client, collection_name, vector_size, distance_metric="Cos
                 distance=distance_metric
             )
         )
-        # Note: Ensure that Docker volumes are set up correctly for Qdrant data persistence.
+
 
 def upsert_embeddings_qdrant(client, collection_name, embeddings, metadata, payload_fields):
     """
-    Upserts embeddings and their metadata into a Qdrant collection.
-    
+    Upserts embeddings and their metadata into a Qdrant collection with valid point IDs.
+
     Parameters:
     - client (QdrantClient): The Qdrant client instance.
     - collection_name (str): The name of the collection.
     - embeddings (list or np.ndarray): The list or array of embedding vectors.
     - metadata (list of dict): The list of metadata dictionaries corresponding to each embedding.
     - payload_fields (list): The list of metadata fields to store in Qdrant.
-    
+
     Returns:
     - None
     """
     # Initialize a list to store the points to upsert
     points = []
     # Loop through each embedding and its metadata
-    for idx, (embedding, meta) in enumerate(zip(embeddings, metadata)):
-        try:
-            # Extract the payload fields from the metadata
-            payload = {field: meta[field] for field in payload_fields}
-        except KeyError as e:
-            print(f"Missing key in metadata: {e}. Skipping this entry.")
-            continue
-        
+    for idx, (meta, vector) in enumerate(zip(metadata, embeddings)):
+        # Use an unsigned integer as the point ID
+        point_id = idx  # or idx + 1 if you want to start from 1
+
+        # Include the unique identifier in the payload
+        unique_id = f"{meta['document']}_{meta['passage_index']}"
+        payload = {field: meta[field] for field in payload_fields}
+        payload['unique_id'] = unique_id  # Add the unique ID to the payload
+
         # Convert the embedding to a list if it's a NumPy array
-        if isinstance(embedding, np.ndarray):
-            vector = embedding.tolist()
-        elif isinstance(embedding, list):
-            vector = embedding
+        if isinstance(vector, np.ndarray):
+            vector = vector.tolist()
+        elif isinstance(vector, list):
+            vector = vector
         else:
-            vector = list(embedding)  # Fallback to list conversion
+            vector = list(vector)  # Fallback to list conversion
 
         # Create a point structure with the embedding and payload
-        points.append(qmodels.PointStruct(id=idx, vector=vector, payload=payload))
-    
+        points.append(qmodels.PointStruct(id=point_id, vector=vector, payload=payload))
+
     # Upsert the points into the Qdrant collection
     if points:
         client.upsert(collection_name=collection_name, points=points)
@@ -299,23 +315,32 @@ def upsert_embeddings_qdrant(client, collection_name, embeddings, metadata, payl
     else:
         print("No valid points to upsert.")
 
+
 def perform_similarity_search(client, collection_name, query_embedding, top_k=5):
     """
     Performs a similarity search in Qdrant and retrieves the top_k most similar passages.
-    
+
     Parameters:
     - client (QdrantClient): The Qdrant client instance.
     - collection_name (str): The name of the collection.
     - query_embedding (list or np.ndarray): The embedding vector for the query.
     - top_k (int): The number of top similar passages to retrieve.
-    
+
     Returns:
     - results (list): A list of dictionaries containing similar passages and their metadata.
     """
+    # Ensure the query_embedding is a list
+    if isinstance(query_embedding, np.ndarray):
+        query_vector = query_embedding.tolist()
+    elif isinstance(query_embedding, list):
+        query_vector = query_embedding
+    else:
+        query_vector = query_embedding.cpu().numpy().tolist()
+
     # Perform a search in Qdrant using the query embedding
     search_result = client.search(
         collection_name=collection_name,
-        query_vector=query_embedding,
+        query_vector=query_vector,
         limit=top_k,
         with_payload=True
     )
@@ -324,54 +349,134 @@ def perform_similarity_search(client, collection_name, query_embedding, top_k=5)
     # Loop through each search result
     for hit in search_result:
         result = {
+            'id': hit.id,  # Point ID as an integer
             'score': hit.score,
             'passage': hit.payload.get('passage'),
             'document': hit.payload.get('document'),
             'passage_index': hit.payload.get('passage_index'),
-            'cluster': hit.payload.get('cluster')
+            'cluster': hit.payload.get('cluster'),
+            'unique_id': hit.payload.get('unique_id')  # Retrieve the unique ID from payload
         }
         results.append(result)
     # Return the list of results
     return results
 
-def highlight_similar_text_using_model(query, passage, model, threshold=0.6):
+
+def highlight_similar_text_using_model(query, passage, model, stopwords_set, threshold=0.7):
     """
-    Highlights similar sentences in the passage based on semantic similarity with the query.
+    Highlights similar content words in the passage based on semantic similarity with the query.
 
     Parameters:
     - query (str): The query text.
     - passage (str): The passage text.
     - model (SentenceTransformer): The pre-trained model for embeddings.
-    - threshold (float): Similarity threshold for highlighting sentences.
+    - stopwords_set (set): Set of stopwords to exclude.
+    - threshold (float): Similarity threshold for highlighting words.
 
     Returns:
-    - highlighted_passage (str): The passage with similar sentences highlighted.
+    - highlighted_passage (str): The passage with similar words highlighted.
     """
-    # Split the passage into sentences using regex
-    sentences = re.split(r'(?<=[.!?])\s+', passage)
-    
-    # Compute embedding for the query
-    query_embedding = model.encode([query], convert_to_tensor=True)
+    # Tokenize query and passage into words
+    query_tokens = re.findall(r'\b\w+\b', query.lower())
+    passage_tokens = passage.split()
 
-    # Compute embeddings for each sentence in the passage
-    sentence_embeddings = model.encode(sentences, convert_to_tensor=True)
+    # Filter out stopwords
+    query_tokens_filtered = [word for word in query_tokens if word not in stopwords_set]
+    passage_tokens_filtered = [word for word in passage_tokens if re.sub(r'[^\w\s]', '', word).lower() not in stopwords_set]
+
+    # Get unique passage tokens
+    unique_passage_tokens = list(set(passage_tokens_filtered))
+
+    if not query_tokens_filtered or not unique_passage_tokens:
+        # If there are no tokens to compare, return the original passage
+        return html.escape(passage)
+
+    # Encode the query and passage tokens
+    query_embeddings = model.encode(query_tokens_filtered, convert_to_tensor=True)
+    passage_embeddings = model.encode(unique_passage_tokens, convert_to_tensor=True)
+
+    # Move tensors to CPU if necessary
+    query_embeddings = query_embeddings.cpu()
+    passage_embeddings = passage_embeddings.cpu()
 
     # Compute cosine similarities
-    similarities = cosine_similarity(query_embedding, sentence_embeddings)[0]
+    similarities = cosine_similarity(query_embeddings.numpy(), passage_embeddings.numpy())
 
-    # Highlight sentences that exceed the similarity threshold
-    highlighted_sentences = []
-    for sentence, similarity in zip(sentences, similarities):
-        if similarity >= threshold:
-            # Wrap the sentence in <mark> tags
-            highlighted_sentence = f'<mark>{html.escape(sentence)}</mark>'
+    # Find tokens with similarity above the threshold
+    similar_tokens = set()
+    for i, query_word in enumerate(query_tokens_filtered):
+        for j, passage_word in enumerate(unique_passage_tokens):
+            if similarities[i][j] >= threshold:
+                similar_tokens.add(passage_word.lower())
+
+    # Highlight similar tokens in the passage
+    highlighted_words = []
+    for word in passage_tokens:
+        word_clean = re.sub(r'[^\w\s]', '', word)
+        if word_clean.lower() in similar_tokens:
+            highlighted_word = f'<mark>{html.escape(word)}</mark>'
         else:
-            highlighted_sentence = html.escape(sentence)
-        highlighted_sentences.append(highlighted_sentence)
+            highlighted_word = html.escape(word)
+        highlighted_words.append(highlighted_word)
 
-    # Reconstruct the passage
-    highlighted_passage = ' '.join(highlighted_sentences)
+    highlighted_passage = ' '.join(highlighted_words)
     return highlighted_passage
+
+
+def retrieve_and_verify_qdrant_data(client, collection_name, original_metadata):
+    """
+    Retrieves all data from Qdrant and verifies passage indices.
+
+    Parameters:
+    - client (QdrantClient): The Qdrant client instance.
+    - collection_name (str): The name of the collection.
+    - original_metadata (list of dict): The original metadata used during upsert.
+
+    Returns:
+    - None
+    """
+    # Initialize the offset for pagination
+    offset = None
+    all_hits = []
+
+    while True:
+        # Corrected parameter name from 'scroll' to 'offset'
+        result, next_page_offset = client.scroll(
+            collection_name=collection_name,
+            offset=offset,
+            limit=100,
+            with_payload=True
+        )
+        all_hits.extend(result)
+
+        if next_page_offset is None:
+            break
+        offset = next_page_offset
+
+    # Create a mapping from unique_id to payload
+    qdrant_data = {}
+    for hit in all_hits:
+        qdrant_data[hit.payload['unique_id']] = hit.payload
+
+    # Verify each entry
+    mismatches = []
+    for meta in original_metadata:
+        unique_id = f"{meta['document']}_{meta['passage_index']}"
+        if unique_id not in qdrant_data:
+            mismatches.append(f"Missing in Qdrant: {unique_id}")
+            continue
+        qdrant_passage = qdrant_data[unique_id]['passage']
+        original_passage = meta['passage']
+        if qdrant_passage != original_passage:
+            mismatches.append(f"Mismatch in passage for {unique_id}")
+
+    if mismatches:
+        print("Found mismatches in Qdrant data:")
+        for mismatch in mismatches:
+            print(mismatch)
+    else:
+        print("All passages in Qdrant match the original metadata.")
+
 
 # ------------------------ Main Pipeline ------------------------
 
@@ -525,7 +630,6 @@ def main():
                 perplexity=perplexity,
                 random_state=42,
                 n_iter=1000,
-                init='pca',  # Use PCA initialization for better global structure
                 learning_rate='auto'  # Adjust learning rate automatically
             )
             # Fit t-SNE to the data and reduce dimensions
@@ -595,6 +699,14 @@ def main():
         payload_fields=payload_fields
     )
 
+    # Verify passage indices in Qdrant
+    print("\nVerifying passage indices in Qdrant...")
+    retrieve_and_verify_qdrant_data(
+        client=client,
+        collection_name=qdrant_collection_name,
+        original_metadata=metadata
+    )
+
     # ------------------------ Similarity Search with Model-based Highlighting ------------------------
 
     try:
@@ -622,6 +734,11 @@ def main():
                 print(f"\nQuery: {query}")
                 # Encode the query into an embedding
                 query_embedding = model.encode([query], convert_to_tensor=False)[0]
+                # Ensure the query embedding is on CPU
+                if hasattr(query_embedding, 'cpu'):
+                    query_embedding = query_embedding.cpu().numpy()
+                else:
+                    query_embedding = np.array(query_embedding)
 
                 # Perform similarity search in Qdrant
                 similar_passages = perform_similarity_search(
@@ -637,8 +754,14 @@ def main():
                     print("\nTop 3 similar passages:")
                     # Loop through each similar passage
                     for idx, passage in enumerate(similar_passages, 1):
-                        # Highlight similar text using the model
-                        highlighted_passage = highlight_similar_text_using_model(query, passage['passage'], model, threshold=0.6)
+                        # Highlight similar text using the model and stopwords
+                        highlighted_passage = highlight_similar_text_using_model(
+                            query,
+                            passage['passage'],
+                            model,
+                            greek_stopwords,
+                            threshold=0.7  # Increased threshold
+                        )
 
                         # Write to the HTML report
                         report_file.write(f'<li>')
@@ -668,6 +791,7 @@ def main():
 
     except Exception as e:
         print(f"An error occurred during similarity search: {e}")
+
 
 # ------------------------ Execute Pipeline ------------------------
 
