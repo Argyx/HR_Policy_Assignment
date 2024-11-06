@@ -30,7 +30,7 @@ nltk.download('stopwords')
 # ------------------------ Configuration ------------------------
 
 # Define the path to the folder containing the .txt files to process
-folder_path = 'data'
+folder_path = 'data'  # Update this path as needed
 
 # Define model parameters
 max_tokens = 128  # Maximum number of tokens per text chunk, aligned with the model's max sequence length
@@ -302,7 +302,7 @@ def perform_similarity_search(client, collection_name, query_embedding, top_k=5)
     elif isinstance(query_embedding, list):
         query_vector = query_embedding
     else:
-        query_vector = query_embedding.cpu().numpy().tolist()
+        query_vector = list(query_embedding)  # Fallback conversion
 
     # Perform a search in Qdrant using the query embedding
     search_result = client.search(
@@ -325,6 +325,245 @@ def perform_similarity_search(client, collection_name, query_embedding, top_k=5)
         }
         results.append(result)
     return results  # Return the list of results
+
+def retrieve_and_verify_qdrant_data(client, collection_name, original_metadata):
+    """
+    Retrieves all data from Qdrant and verifies passage indices.
+
+    Parameters:
+    - client (QdrantClient): The Qdrant client instance.
+    - collection_name (str): The name of the collection.
+    - original_metadata (list of dict): The original metadata used during upsert.
+
+    Returns:
+    - None
+    """
+    offset = None  # Initial offset for pagination in Qdrant
+    all_hits = []  # List to store all retrieved points
+
+    while True:
+        # Retrieve points from Qdrant with pagination
+        result, next_page_offset = client.scroll(
+            collection_name=collection_name,
+            offset=offset,
+            limit=100,
+            with_payload=True
+        )
+        all_hits.extend(result)  # Add retrieved points to the list
+
+        if next_page_offset is None:
+            break  # Exit if no more points to retrieve
+        offset = next_page_offset  # Update offset for next iteration
+
+    # Create a mapping from unique_id to payload
+    qdrant_data = {}
+    for hit in all_hits:
+        qdrant_data[hit.payload['unique_id']] = hit.payload
+
+    mismatches = []  # List to store any mismatches found
+    for meta in original_metadata:
+        unique_id = f"{meta['document']}_{meta['passage_index']}"
+        if unique_id not in qdrant_data:
+            mismatches.append(f"Missing in Qdrant: {unique_id}")
+            continue
+        qdrant_passage = qdrant_data[unique_id]['passage']
+        original_passage = meta['passage']
+        if qdrant_passage != original_passage:
+            mismatches.append(f"Mismatch in passage for {unique_id}")
+
+    # Report mismatches or confirm data integrity
+    if mismatches:
+        print("Found mismatches in Qdrant data:")
+        for mismatch in mismatches:
+            print(mismatch)
+    else:
+        print("All passages in Qdrant match the original metadata.")
+
+def highlight_similar_sentences(passage, model, stopwords_set, thresholds=None):
+    """
+    Highlights similar sentences in the passage based on semantic similarity with the overall embedding.
+
+    Parameters:
+    - passage (str): The passage text.
+    - model (SentenceTransformer): The pre-trained model for embeddings.
+    - stopwords_set (set): Set of stopwords to exclude.
+    - thresholds (list of tuples): List of (threshold, color) tuples in descending order.
+
+    Returns:
+    - highlighted_passage (str): The passage with similar sentences highlighted in different colors.
+    """
+    # Default thresholds and colors if none are provided
+    if thresholds is None:
+        thresholds = [
+            (0.9, 'red'),       # Very high similarity
+            (0.8, 'orange'),    # High similarity
+            (0.7, 'yellow'),    # Moderate similarity
+            (0.5, 'green')      # Low similarity
+        ]
+
+    # Ensure the colors are valid HTML color names or hex codes
+    valid_colors = set(mcolors.CSS4_COLORS.keys()) | set(mcolors.TABLEAU_COLORS.keys())
+
+    # Split the passage into sentences
+    sentences = re.split(r'(?<=[.!?])\s+', passage)
+    highlighted_sentences = []
+
+    # Encode all sentences
+    sentence_embeddings = model.encode(sentences, convert_to_tensor=False)
+    sentence_embeddings = np.array(sentence_embeddings)
+
+    # Compute the overall embedding for the passage
+    passage_embedding = np.mean(sentence_embeddings, axis=0).reshape(1, -1)
+
+    # Compute cosine similarity between each sentence and the overall passage
+    similarities = cosine_similarity(passage_embedding, sentence_embeddings)[0]
+
+    for idx, sentence in enumerate(sentences):
+        sim_score = similarities[idx]
+        color = None
+        for threshold, color_name in thresholds:
+            if sim_score >= threshold:
+                color = color_name
+                break  # Use the first matching threshold
+
+        if color and color in valid_colors:
+            highlighted_sentence = f'<span style="background-color:{color}">{html.escape(sentence)}</span>'
+        else:
+            highlighted_sentence = html.escape(sentence)
+        highlighted_sentences.append(highlighted_sentence)
+
+    highlighted_passage = ' '.join(highlighted_sentences)
+    return highlighted_passage
+
+def generate_overlap_recommendations_html(passages, metadata, embeddings, model, stopwords_set):
+    """
+    Generates an HTML file with overlap recommendations, highlighting similar sentences in Document B.
+
+    Parameters:
+    - passages (list): List of all passages.
+    - metadata (list of dict): Metadata for each passage.
+    - embeddings (list or np.ndarray): Embeddings of the passages.
+    - model (SentenceTransformer): Model for generating embeddings.
+    - stopwords_set (set): Set of stopwords to exclude.
+
+    Returns:
+    - None
+    """
+    print("\nGenerating overlap recommendations in HTML format...")
+
+    # Calculate pairwise cosine similarity between embeddings
+    similarity_matrix = cosine_similarity(embeddings)
+
+    # Define thresholds with corresponding recommendations and colors
+    similarity_thresholds = [
+        (0.9, 'Merge or remove one of the passages', 'red'),
+        (0.8, 'Revise to differentiate', 'orange'),
+        (0.7, 'Consider possible consolidation', 'yellow'),
+        (0.5, 'Likely okay, but check for clarity', 'green')
+    ]
+
+    # Prepare a list to store recommendations
+    recommendations = []
+
+    num_passages = len(passages)
+    for i in range(num_passages):
+        for j in range(i + 1, num_passages):
+            # Ensure that Document A and Document B are different
+            if metadata[i]['document'] == metadata[j]['document']:
+                continue  # Skip pairs from the same document
+
+            sim_score = similarity_matrix[i][j]
+            action = None  # Initialize action to None before checking thresholds
+            color = None   # Initialize color to None
+
+            for threshold, suggestion, color_name in similarity_thresholds:
+                if sim_score >= threshold:
+                    action = suggestion
+                    color = color_name
+                    break
+            if action:
+                recommendations.append({
+                    'Passage Index A': metadata[i]['passage_index'],
+                    'Document A': metadata[i]['document'],
+                    'Passage A': passages[i],
+                    'Passage Index B': metadata[j]['passage_index'],
+                    'Document B': metadata[j]['document'],
+                    'Passage B': passages[j],
+                    'Similarity Score': sim_score,
+                    'Recommendation': action,
+                    'Row Color': None  # We'll handle coloring within the passages
+                })
+
+    # Sort recommendations from highest to lowest similarity
+    recommendations.sort(key=lambda x: x['Similarity Score'], reverse=True)
+
+    # Create an HTML file
+    html_filename = 'overlap_recommendations.html'
+    with open(html_filename, 'w', encoding='utf-8') as html_file:
+        # Write the HTML header
+        html_file.write('<html><head><meta charset="UTF-8"><title>Overlap Recommendations</title></head><body>')
+        html_file.write('<h1>Overlap Recommendations</h1>')
+
+        # Add a color legend
+        html_file.write('''
+        <h2>Color Legend for Document B:</h2>
+        <ul>
+          <li><span style="background-color:red;">&nbsp;&nbsp;&nbsp;&nbsp;</span> Very High Similarity (>= 0.9)</li>
+          <li><span style="background-color:orange;">&nbsp;&nbsp;&nbsp;&nbsp;</span> High Similarity (>= 0.8)</li>
+          <li><span style="background-color:yellow;">&nbsp;&nbsp;&nbsp;&nbsp;</span> Moderate Similarity (>= 0.7)</li>
+          <li><span style="background-color:green;">&nbsp;&nbsp;&nbsp;&nbsp;</span> Low Similarity (>= 0.5)</li>
+        </ul>
+        ''')
+
+        # Start the table
+        html_file.write('<table border="1" cellpadding="5" cellspacing="0">')
+        # Table headers
+        html_file.write('''
+            <tr>
+                <th>Document A</th>
+                <th>Passage A</th>
+                <th>Document B</th>
+                <th>Passage B</th>
+                <th>Similarity Score</th>
+                <th>Recommendation</th>
+            </tr>
+        ''')
+
+        # Populate the table rows
+        for rec in recommendations:
+            # Highlight similar sentences only in Passage B
+            highlighted_passage_b = highlight_similar_sentences(
+                rec['Passage B'],
+                model,
+                stopwords_set,
+                thresholds=[
+                    (0.9, 'red'),
+                    (0.8, 'orange'),
+                    (0.7, 'yellow'),
+                    (0.5, 'green')
+                ]
+            )
+
+            # Determine the row color based on similarity score for additional visual cue (optional)
+            # If you prefer not to have row colors, set 'Row Color' to None
+            row_color = None  # rec['Row Color']  # Previously was yellow
+
+            # Write the table row without row-wide highlighting
+            html_file.write(f'''
+                <tr>
+                    <td>{html.escape(rec['Document A'])}</td>
+                    <td>{html.escape(rec['Passage A'])}</td>
+                    <td>{html.escape(rec['Document B'])}</td>
+                    <td>{highlighted_passage_b}</td>
+                    <td>{rec['Similarity Score']:.2f}</td>
+                    <td>{html.escape(rec['Recommendation'])}</td>
+                </tr>
+            ''')
+
+        # Close the table and HTML
+        html_file.write('</table></body></html>')
+
+    print(f"Overlap recommendations have been written to {html_filename}")
 
 def highlight_similar_text_using_model(query, passage, model, stopwords_set, thresholds=None):
     """
@@ -407,58 +646,234 @@ def highlight_similar_text_using_model(query, passage, model, stopwords_set, thr
     highlighted_passage = ' '.join(highlighted_words)  # Reconstruct the passage
     return highlighted_passage  # Return the highlighted passage
 
-def retrieve_and_verify_qdrant_data(client, collection_name, original_metadata):
+def highlight_overlap_between_passages(passage_a, passage_b, model, stopwords_set, thresholds=None):
     """
-    Retrieves all data from Qdrant and verifies passage indices.
+    Highlights overlapping or similar content words between two passages based on semantic similarity.
 
     Parameters:
+    - passage_a (str): The first passage.
+    - passage_b (str): The second passage.
+    - model (SentenceTransformer): The pre-trained model for embeddings.
+    - stopwords_set (set): Set of stopwords to exclude.
+    - thresholds (list of tuples): List of (threshold, color) tuples in descending order.
+
+    Returns:
+    - highlighted_passage_a (str): Passage A with overlapping words highlighted.
+    - highlighted_passage_b (str): Passage B with overlapping words highlighted.
+    """
+    # Default thresholds and colors if none are provided
+    if thresholds is None:
+        thresholds = [
+            (0.9, 'red'),       # Very high similarity
+            (0.8, 'orange'),    # High similarity
+            (0.7, 'yellow'),    # Moderate similarity
+            (0.5, 'green')      # Low similarity
+        ]
+
+    # Ensure the colors are valid HTML color names or hex codes
+    valid_colors = set(mcolors.CSS4_COLORS.keys()) | set(mcolors.TABLEAU_COLORS.keys())
+
+    # Tokenize both passages into words
+    tokens_a = re.findall(r'\b\w+\b', passage_a.lower())
+    tokens_b = re.findall(r'\b\w+\b', passage_b.lower())
+
+    # Filter out stopwords
+    tokens_a_filtered = [word for word in tokens_a if word not in stopwords_set]
+    tokens_b_filtered = [word for word in tokens_b if re.sub(r'[^\w\s]', '', word).lower() not in stopwords_set]
+
+    # Remove duplicates
+    unique_tokens_a = list(set(tokens_a_filtered))
+    unique_tokens_b = list(set(tokens_b_filtered))
+
+    # Encode the tokens using the model
+    embeddings_a = model.encode(unique_tokens_a, convert_to_tensor=True)
+    embeddings_b = model.encode(unique_tokens_b, convert_to_tensor=True)
+
+    # Move embeddings to CPU if necessary
+    embeddings_a = embeddings_a.cpu().numpy()
+    embeddings_b = embeddings_b.cpu().numpy()
+
+    # Compute cosine similarities between tokens in Passage A and Passage B
+    similarity_matrix = cosine_similarity(embeddings_a, embeddings_b)
+
+    # Determine which tokens are similar above the thresholds
+    overlapping_a = set()
+    overlapping_b = set()
+
+    for i, word_a in enumerate(unique_tokens_a):
+        for j, word_b in enumerate(unique_tokens_b):
+            sim_score = similarity_matrix[i][j]
+            for threshold, color in thresholds:
+                if sim_score >= threshold:
+                    overlapping_a.add(word_a)
+                    overlapping_b.add(word_b)
+                    break  # Move to next word_a after first matching threshold
+
+    # Highlight overlapping words in Passage A
+    highlighted_passage_a = ''
+    for word in passage_a.split():
+        word_clean = re.sub(r'[^\w\s]', '', word).lower()
+        if word_clean in overlapping_a:
+            # Determine the highest threshold that applies
+            sim_scores = []
+            for threshold, color in thresholds:
+                if word_clean in overlapping_a:
+                    sim_scores.append((threshold, color))
+            if sim_scores:
+                # Find the highest threshold that applies
+                sim_scores_sorted = sorted(sim_scores, key=lambda x: x[0], reverse=True)
+                _, color = sim_scores_sorted[0]
+                if color in valid_colors:
+                    highlighted_word = f'<span style="background-color:{color}">{html.escape(word)}</span>'
+                else:
+                    highlighted_word = html.escape(word)
+            else:
+                highlighted_word = html.escape(word)
+        else:
+            highlighted_word = html.escape(word)
+        highlighted_passage_a += highlighted_word + ' '
+
+    # Highlight overlapping words in Passage B
+    highlighted_passage_b = ''
+    for word in passage_b.split():
+        word_clean = re.sub(r'[^\w\s]', '', word).lower()
+        if word_clean in overlapping_b:
+            # Determine the highest threshold that applies
+            sim_scores = []
+            for threshold, color in thresholds:
+                if word_clean in overlapping_b:
+                    sim_scores.append((threshold, color))
+            if sim_scores:
+                # Find the highest threshold that applies
+                sim_scores_sorted = sorted(sim_scores, key=lambda x: x[0], reverse=True)
+                _, color = sim_scores_sorted[0]
+                if color in valid_colors:
+                    highlighted_word = f'<span style="background-color:{color}">{html.escape(word)}</span>'
+                else:
+                    highlighted_word = html.escape(word)
+            else:
+                highlighted_word = html.escape(word)
+        else:
+            highlighted_word = html.escape(word)
+        highlighted_passage_b += highlighted_word + ' '
+
+    return highlighted_passage_a.strip(), highlighted_passage_b.strip()
+
+def generate_similarity_report_html(queries, client, collection_name, model, stopwords_set):
+    """
+    Generates an HTML report with similarity search results and highlighted similar text.
+
+    Parameters:
+    - queries (list): List of query strings.
     - client (QdrantClient): The Qdrant client instance.
-    - collection_name (str): The name of the collection.
-    - original_metadata (list of dict): The original metadata used during upsert.
+    - collection_name (str): The name of the Qdrant collection.
+    - model (SentenceTransformer): The pre-trained model for embeddings.
+    - stopwords_set (set): Set of stopwords to exclude.
 
     Returns:
     - None
     """
-    offset = None  # For pagination
-    all_hits = []  # List to store all retrieved points
+    print("\nGenerating similarity report in HTML format...")
 
-    while True:
-        # Retrieve points from Qdrant with pagination
-        result, next_page_offset = client.scroll(
-            collection_name=collection_name,
-            offset=offset,
-            limit=100,
-            with_payload=True
-        )
-        all_hits.extend(result)  # Add retrieved points to the list
+    # Create an HTML report to display results
+    report_filename = 'similarity_report.html'
+    with open(report_filename, 'w', encoding='utf-8') as report_file:
+        # Write the header of the HTML file
+        report_file.write('<html><head><meta charset="UTF-8"><title>Similarity Report</title></head><body>')
+        report_file.write('<h1>Similarity Report</h1>')
 
-        if next_page_offset is None:
-            break  # Exit if no more points to retrieve
-        offset = next_page_offset  # Update offset for next iteration
+        # Add the color legend
+        report_file.write('''
+        <h2>Color Legend:</h2>
+        <ul>
+          <li><span style="background-color:red;">&nbsp;&nbsp;&nbsp;&nbsp;</span> Very High Similarity (>= 0.9)</li>
+          <li><span style="background-color:orange;">&nbsp;&nbsp;&nbsp;&nbsp;</span> High Similarity (>= 0.8)</li>
+          <li><span style="background-color:yellow;">&nbsp;&nbsp;&nbsp;&nbsp;</span> Moderate Similarity (>= 0.7)</li>
+          <li><span style="background-color:green;">&nbsp;&nbsp;&nbsp;&nbsp;</span> Low Similarity (>= 0.5)</li>
+        </ul>
+        ''')
 
-    # Create a mapping from unique_id to payload
-    qdrant_data = {}
-    for hit in all_hits:
-        qdrant_data[hit.payload['unique_id']] = hit.payload
+        # Process each query
+        for query in queries:
+            report_file.write(f'<h2>Query: {html.escape(query)}</h2>')
+            print(f"\nQuery: {query}")
+            # Encode the query into an embedding
+            query_embedding = model.encode([query], convert_to_tensor=False)[0]
+            # Ensure the query embedding is on CPU
+            if hasattr(query_embedding, 'cpu'):
+                query_embedding = query_embedding.cpu().numpy()
+            else:
+                query_embedding = np.array(query_embedding)
+            # Perform similarity search in Qdrant
+            similar_passages = perform_similarity_search(
+                client=client,
+                collection_name=collection_name,
+                query_embedding=query_embedding,
+                top_k=3
+            )
 
-    mismatches = []  # List to store any mismatches found
-    for meta in original_metadata:
-        unique_id = f"{meta['document']}_{meta['passage_index']}"
-        if unique_id not in qdrant_data:
-            mismatches.append(f"Missing in Qdrant: {unique_id}")
-            continue
-        qdrant_passage = qdrant_data[unique_id]['passage']
-        original_passage = meta['passage']
-        if qdrant_passage != original_passage:
-            mismatches.append(f"Mismatch in passage for {unique_id}")
+            if similar_passages:
+                report_file.write('<ol>')
+                print("\nTop 3 similar passages:")
+                # Process each similar passage
+                for idx, passage in enumerate(similar_passages, 1):
+                    # Highlight similar text using the model and stopwords
+                    highlighted_passage = highlight_similar_text_using_model(
+                        query,
+                        passage['passage'],
+                        model,
+                        stopwords_set,
+                        thresholds=[
+                            (0.9, 'red'),
+                            (0.8, 'orange'),
+                            (0.7, 'yellow'),
+                            (0.5, 'green')
+                        ]  # Custom thresholds and colors
+                    )
 
-    # Report mismatches or confirm data integrity
-    if mismatches:
-        print("Found mismatches in Qdrant data:")
-        for mismatch in mismatches:
-            print(mismatch)
-    else:
-        print("All passages in Qdrant match the original metadata.")
+                    # Determine the overall similarity level for the passage
+                    sim_score = passage["score"]
+                    if sim_score >= 0.9:
+                        sim_level = 'Very High Similarity'
+                        sim_color = 'red'
+                    elif sim_score >= 0.8:
+                        sim_level = 'High Similarity'
+                        sim_color = 'orange'
+                    elif sim_score >= 0.7:
+                        sim_level = 'Moderate Similarity'
+                        sim_color = 'yellow'
+                    elif sim_score >= 0.5:
+                        sim_level = 'Low Similarity'
+                        sim_color = 'green'
+                    else:
+                        sim_level = 'No Significant Similarity'
+                        sim_color = 'white'
+
+                    # Write the result to the HTML report
+                    report_file.write(f'<li>')
+                    report_file.write(f'<p><strong>Rank {idx}</strong></p>')
+                    report_file.write(f'<p><strong>Score:</strong> {sim_score:.4f}</p>')
+                    report_file.write(f'<p><strong>Document:</strong> {html.escape(passage["document"])}</p>')
+                    report_file.write(f'<p><strong>Passage Index:</strong> {passage["passage_index"]}</p>')
+                    report_file.write(f'<p><strong>Passage:</strong> {highlighted_passage}</p>')
+                    report_file.write('</li>')
+
+                    # Also print the results to the console
+                    print(f"\nRank {idx}:")
+                    print(f"Score: {passage['score']:.4f}")
+                    print(f"Document: {passage['document']}")
+                    print(f"Passage Index: {passage['passage_index']}")
+                    print(f"Passage: {passage['passage']}")
+            else:
+                report_file.write('<p>No similar passages found.</p>')
+                print("No similar passages found.")
+
+            report_file.write('</ol>')
+
+        # Write the footer of the HTML file
+        report_file.write('</body></html>')
+
+    print(f"\nSimilarity report generated: {report_filename}")
 
 # ------------------------ Main Pipeline ------------------------
 
@@ -618,7 +1033,7 @@ def main():
             df['Cluster'] = cluster_assignments.astype(str)
             df['Document'] = [m['document'] for m in metadata]
 
-            # Plot the clusters using seaborn
+            # Plot the clusters using Seaborn
             plt.figure(figsize=(12, 8))
             sns.scatterplot(
                 data=df,
@@ -682,12 +1097,18 @@ def main():
         original_metadata=metadata
     )
 
-    # ------------------------ Step 9: Similarity Search and Highlighting ------------------------
+    # ------------------------ Step 9: Generate Overlap Recommendations ------------------------
+
+    # Generate overlap recommendations in HTML format
+    generate_overlap_recommendations_html(passages, metadata, embeddings, model, greek_stopwords)
+
+    # ------------------------ Step 10: Similarity Search and Highlighting ------------------------
 
     try:
         print("\nPerforming similarity searches for provided phrases and highlighting similar text...")
-        # List of queries in Greek
+        # List of queries in Greek or English
         queries = [
+            # Add more queries as needed
             "Πότε πρέπει να υποβάλω αίτηση για άδεια μητρότητας ή πατρότητας;",
             "Ποιοι κανόνες ασφάλειας και υγείας πρέπει να τηρούνται στον εργασιακό χώρο;",
             "Πώς αξιολογείται η απόδοσή μου και ποια είναι τα κριτήρια;",
@@ -725,7 +1146,6 @@ def main():
                     query_embedding = query_embedding.cpu().numpy()
                 else:
                     query_embedding = np.array(query_embedding)
-
                 # Perform similarity search in Qdrant
                 similar_passages = perform_similarity_search(
                     client=client,
@@ -753,10 +1173,28 @@ def main():
                             ]  # Custom thresholds and colors
                         )
 
+                        # Determine the overall similarity level for the passage
+                        sim_score = passage["score"]
+                        if sim_score >= 0.9:
+                            sim_level = 'Very High Similarity'
+                            sim_color = 'red'
+                        elif sim_score >= 0.8:
+                            sim_level = 'High Similarity'
+                            sim_color = 'orange'
+                        elif sim_score >= 0.7:
+                            sim_level = 'Moderate Similarity'
+                            sim_color = 'yellow'
+                        elif sim_score >= 0.5:
+                            sim_level = 'Low Similarity'
+                            sim_color = 'green'
+                        else:
+                            sim_level = 'No Significant Similarity'
+                            sim_color = 'white'
+
                         # Write the result to the HTML report
                         report_file.write(f'<li>')
                         report_file.write(f'<p><strong>Rank {idx}</strong></p>')
-                        report_file.write(f'<p><strong>Score:</strong> {passage["score"]:.4f}</p>')
+                        report_file.write(f'<p><strong>Score:</strong> {sim_score:.4f}</p>')
                         report_file.write(f'<p><strong>Document:</strong> {html.escape(passage["document"])}</p>')
                         report_file.write(f'<p><strong>Passage Index:</strong> {passage["passage_index"]}</p>')
                         report_file.write(f'<p><strong>Passage:</strong> {highlighted_passage}</p>')
@@ -778,6 +1216,7 @@ def main():
             report_file.write('</body></html>')
 
         print(f"\nSimilarity report generated: {report_filename}")
+
 
     except Exception as e:
         print(f"An error occurred during similarity search: {e}")
