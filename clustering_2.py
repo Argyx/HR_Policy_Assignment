@@ -31,7 +31,7 @@ nltk.download('universal_tagset')
 # ------------------------ Configuration ------------------------
 
 # Define the path to the folder containing the .txt files
-folder_path = '/Users/aris/HR_Policy_Assignment/src'
+folder_path = 'data'
 
 # Define model parameters
 max_tokens = 128  # Maximum number of tokens per chunk, aligned with model's max_seq_length
