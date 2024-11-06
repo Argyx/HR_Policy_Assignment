@@ -20,6 +20,7 @@ import html  # For escaping HTML content in strings
 from sklearn.metrics.pairwise import cosine_similarity  # For computing similarity between vectors
 import nltk  # For natural language processing tasks
 from nltk.corpus import stopwords  # For accessing stopwords
+import matplotlib.colors as mcolors  # For validating and using color names
 
 # ------------------------ NLTK Setup ------------------------
 
@@ -325,20 +326,33 @@ def perform_similarity_search(client, collection_name, query_embedding, top_k=5)
         results.append(result)
     return results  # Return the list of results
 
-def highlight_similar_text_using_model(query, passage, model, stopwords_set, threshold=0.7):
+def highlight_similar_text_using_model(query, passage, model, stopwords_set, thresholds=None):
     """
-    Highlights similar content words in the passage based on semantic similarity with the query.
+    Highlights similar content words in the passage based on semantic similarity with the query,
+    using different colors to represent different levels of similarity.
 
     Parameters:
     - query (str): The query text.
     - passage (str): The passage text.
     - model (SentenceTransformer): The pre-trained model for embeddings.
     - stopwords_set (set): Set of stopwords to exclude.
-    - threshold (float): Similarity threshold for highlighting words.
+    - thresholds (list of tuples): List of (threshold, color) tuples in descending order.
 
     Returns:
-    - highlighted_passage (str): The passage with similar words highlighted.
+    - highlighted_passage (str): The passage with similar words highlighted in different colors.
     """
+    # Default thresholds and colors if none are provided
+    if thresholds is None:
+        thresholds = [
+            (0.9, 'red'),       # Very high similarity
+            (0.8, 'orange'),    # High similarity
+            (0.7, 'yellow'),    # Moderate similarity
+            (0.5, 'green')      # Low similarity
+        ]
+
+    # Ensure the colors are valid HTML color names or hex codes
+    valid_colors = set(mcolors.CSS4_COLORS.keys()) | set(mcolors.TABLEAU_COLORS.keys())
+
     # Tokenize query and passage into words
     query_tokens = re.findall(r'\b\w+\b', query.lower())
     passage_tokens = passage.split()
@@ -365,21 +379,29 @@ def highlight_similar_text_using_model(query, passage, model, stopwords_set, thr
     # Compute cosine similarities between query and passage tokens
     similarities = cosine_similarity(query_embeddings.numpy(), passage_embeddings.numpy())
 
-    # Identify tokens in the passage that are similar to the query tokens
-    similar_tokens = set()
-    for i, query_word in enumerate(query_tokens_filtered):
-        for j, passage_word in enumerate(unique_passage_tokens):
-            if similarities[i][j] >= threshold:
-                similar_tokens.add(passage_word.lower())
+    # Map passage tokens to their highest similarity score with any query token
+    token_similarity = {}
+    for j, passage_word in enumerate(unique_passage_tokens):
+        max_similarity = max(similarities[:, j])
+        token_similarity[passage_word.lower()] = max_similarity
 
-    # Highlight similar tokens in the passage
+    # Highlight tokens based on their similarity score
     highlighted_words = []
     for word in passage_tokens:
-        word_clean = re.sub(r'[^\w\s]', '', word)  # Remove punctuation
-        if word_clean.lower() in similar_tokens:
-            highlighted_word = f'<mark>{html.escape(word)}</mark>'  # Highlight word
+        word_clean = re.sub(r'[^\w\s]', '', word).lower()  # Remove punctuation and lowercase
+        similarity_score = token_similarity.get(word_clean, 0)
+
+        # Determine the color based on the similarity score
+        color = None
+        for threshold, color_name in thresholds:
+            if similarity_score >= threshold:
+                color = color_name
+                break  # Use the first matching threshold
+
+        if color and color in valid_colors:
+            highlighted_word = f'<span style="background-color:{color}">{html.escape(word)}</span>'
         else:
-            highlighted_word = html.escape(word)  # Escape HTML characters
+            highlighted_word = html.escape(word)
         highlighted_words.append(highlighted_word)
 
     highlighted_passage = ' '.join(highlighted_words)  # Reconstruct the passage
@@ -681,6 +703,17 @@ def main():
             report_file.write('<html><head><meta charset="UTF-8"><title>Similarity Report</title></head><body>')
             report_file.write('<h1>Similarity Report</h1>')
 
+            # Add the color legend
+            report_file.write('''
+            <h2>Color Legend:</h2>
+            <ul>
+              <li><span style="background-color:red;">&nbsp;&nbsp;&nbsp;&nbsp;</span> Very High Similarity (>= 0.9)</li>
+              <li><span style="background-color:orange;">&nbsp;&nbsp;&nbsp;&nbsp;</span> High Similarity (>= 0.8)</li>
+              <li><span style="background-color:yellow;">&nbsp;&nbsp;&nbsp;&nbsp;</span> Moderate Similarity (>= 0.7)</li>
+              <li><span style="background-color:green;">&nbsp;&nbsp;&nbsp;&nbsp;</span> Low Similarity (>= 0.5)</li>
+            </ul>
+            ''')
+
             # Process each query
             for query in queries:
                 report_file.write(f'<h2>Query: {html.escape(query)}</h2>')
@@ -712,7 +745,12 @@ def main():
                             passage['passage'],
                             model,
                             greek_stopwords,
-                            threshold=0.7  # Similarity threshold
+                            thresholds=[
+                                (0.9, 'red'),
+                                (0.8, 'orange'),
+                                (0.7, 'yellow'),
+                                (0.5, 'green')
+                            ]  # Custom thresholds and colors
                         )
 
                         # Write the result to the HTML report
