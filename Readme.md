@@ -131,6 +131,14 @@ A t-SNE plot is generated to visualize the distribution of clusters. Each point 
 
 This HTML report is generated for each query, showing the top 3 most similar passages found. Each passage is highlighted to indicate similar content words, based on a configurable similarity threshold.
 
+### 5. Overlap Table: `overlap_recommendations.html`
+This HTML file provides detailed recommendations on overlapping content found across different documents. Each entry includes:
+
+- **Document A and B**: The documents involved in the overlap.
+- **Passages**: The respective overlapping passages.
+- **Similarity Score**: The score indicating how closely the passages align.
+- **Recommendation**: Suggestions for handling the overlap, such as merging or revising content.
+
 #### Highlighting Similarity Levels with Colors
 
 In the similarity search results, we have enhanced the highlighting of similar text by introducing different colors to represent different levels of similarity between the query and the passages.
