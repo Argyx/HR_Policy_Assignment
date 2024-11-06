@@ -790,7 +790,7 @@ def main():
         print(f"\nSimilarity report generated: {report_filename}")
 
     except Exception as e:
-        print(f"An error occurred during similarity search: {e}")
+        print(f"An error occurred during similarity search: {e}")#test
 
 
 # ------------------------ Execute Pipeline ------------------------
