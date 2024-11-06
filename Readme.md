@@ -166,7 +166,7 @@ highlighted_passage = highlight_similar_text_using_model(
     greek_stopwords,
     thresholds=custom_thresholds
 )
-
+```
 
 #### Structure of `similarity_report.html`
 
