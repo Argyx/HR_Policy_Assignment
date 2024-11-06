@@ -17,6 +17,16 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 import html  # For escaping HTML content
 from sklearn.metrics.pairwise import cosine_similarity
+import nltk  # For stopwords and POS tagging
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from nltk import pos_tag
+
+# Download necessary NLTK data if not already downloaded
+nltk.download('stopwords')
+nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger')
+nltk.download('universal_tagset')
 
 # ------------------------ Configuration ------------------------
 
@@ -37,7 +47,14 @@ qdrant_host = 'localhost'  # Qdrant host
 qdrant_port = 6333         # Qdrant port
 qdrant_collection_name = 'text_clusters'  # Name of the collection in Qdrant
 
+# Get Greek stopwords and enhance the list
+greek_stopwords = set(stopwords.words('greek'))
+# Add additional common words to the stopwords set
+additional_stopwords = {'ένα', 'πριν', 'από', 'προς', 'τους', 'τους', 'στην', 'στις', 'στις', 'της', 'της', 'της', 'του', 'του', 'του', 'μεταξύ', 'ή', 'και'}
+greek_stopwords.update(additional_stopwords)
+
 # ------------------------ Functions ------------------------
+
 
 def split_text_into_chunks(text, max_tokens=128):
     """
@@ -302,20 +319,28 @@ def upsert_embeddings_qdrant(client, collection_name, embeddings, metadata, payl
 def perform_similarity_search(client, collection_name, query_embedding, top_k=5):
     """
     Performs a similarity search in Qdrant and retrieves the top_k most similar passages.
-    
+
     Parameters:
     - client (QdrantClient): The Qdrant client instance.
     - collection_name (str): The name of the collection.
     - query_embedding (list or np.ndarray): The embedding vector for the query.
     - top_k (int): The number of top similar passages to retrieve.
-    
+
     Returns:
     - results (list): A list of dictionaries containing similar passages and their metadata.
     """
+    # Ensure the query_embedding is a list
+    if isinstance(query_embedding, np.ndarray):
+        query_vector = query_embedding.tolist()
+    elif isinstance(query_embedding, list):
+        query_vector = query_embedding
+    else:
+        query_vector = query_embedding.cpu().numpy().tolist()
+
     # Perform a search in Qdrant using the query embedding
     search_result = client.search(
         collection_name=collection_name,
-        query_vector=query_embedding,
+        query_vector=query_vector,
         limit=top_k,
         with_payload=True
     )
@@ -334,44 +359,75 @@ def perform_similarity_search(client, collection_name, query_embedding, top_k=5)
     # Return the list of results
     return results
 
-def highlight_similar_text_using_model(query, passage, model, threshold=0.6):
+def is_content_word(word, lang='greek'):
     """
-    Highlights similar sentences in the passage based on semantic similarity with the query.
+    Determines if a word is a content word (noun, verb, adjective, adverb).
+    Since NLTK's POS tagger doesn't support Greek out of the box, we'll approximate by excluding stopwords.
+    """
+    return word.lower() not in greek_stopwords
+
+def highlight_similar_text_using_model(query, passage, model, stopwords_set, threshold=0.7):
+    """
+    Highlights similar content words in the passage based on semantic similarity with the query.
 
     Parameters:
     - query (str): The query text.
     - passage (str): The passage text.
     - model (SentenceTransformer): The pre-trained model for embeddings.
-    - threshold (float): Similarity threshold for highlighting sentences.
+    - stopwords_set (set): Set of stopwords to exclude.
+    - threshold (float): Similarity threshold for highlighting words.
 
     Returns:
-    - highlighted_passage (str): The passage with similar sentences highlighted.
+    - highlighted_passage (str): The passage with similar words highlighted.
     """
-    # Split the passage into sentences using regex
-    sentences = re.split(r'(?<=[.!?])\s+', passage)
-    
-    # Compute embedding for the query
-    query_embedding = model.encode([query], convert_to_tensor=True)
+    # Tokenize query and passage into words
+    query_tokens = re.findall(r'\b\w+\b', query.lower())
+    passage_tokens = passage.split()
 
-    # Compute embeddings for each sentence in the passage
-    sentence_embeddings = model.encode(sentences, convert_to_tensor=True)
+    # Filter out stopwords
+    query_tokens_filtered = [word for word in query_tokens if word not in stopwords_set]
+    passage_tokens_filtered = [word for word in passage_tokens if re.sub(r'[^\w\s]', '', word).lower() not in stopwords_set]
+
+    # Get unique passage tokens
+    unique_passage_tokens = list(set(passage_tokens_filtered))
+
+    if not query_tokens_filtered or not unique_passage_tokens:
+        # If there are no tokens to compare, return the original passage
+        return html.escape(passage)
+
+    # Encode the query and passage tokens
+    query_embeddings = model.encode(query_tokens_filtered, convert_to_tensor=True)
+    passage_embeddings = model.encode(unique_passage_tokens, convert_to_tensor=True)
+
+    # Move tensors to CPU if necessary
+    query_embeddings = query_embeddings.cpu()
+    passage_embeddings = passage_embeddings.cpu()
 
     # Compute cosine similarities
-    similarities = cosine_similarity(query_embedding, sentence_embeddings)[0]
+    similarities = cosine_similarity(query_embeddings.numpy(), passage_embeddings.numpy())
 
-    # Highlight sentences that exceed the similarity threshold
-    highlighted_sentences = []
-    for sentence, similarity in zip(sentences, similarities):
-        if similarity >= threshold:
-            # Wrap the sentence in <mark> tags
-            highlighted_sentence = f'<mark>{html.escape(sentence)}</mark>'
+    # Find tokens with similarity above the threshold
+    similar_tokens = set()
+    for i, query_word in enumerate(query_tokens_filtered):
+        for j, passage_word in enumerate(unique_passage_tokens):
+            if similarities[i][j] >= threshold:
+                similar_tokens.add(passage_word.lower())
+
+    # Highlight similar tokens in the passage
+    highlighted_words = []
+    for word in passage_tokens:
+        word_clean = re.sub(r'[^\w\s]', '', word)
+        if word_clean.lower() in similar_tokens:
+            highlighted_word = f'<mark>{html.escape(word)}</mark>'
         else:
-            highlighted_sentence = html.escape(sentence)
-        highlighted_sentences.append(highlighted_sentence)
+            highlighted_word = html.escape(word)
+        highlighted_words.append(highlighted_word)
 
-    # Reconstruct the passage
-    highlighted_passage = ' '.join(highlighted_sentences)
+    highlighted_passage = ' '.join(highlighted_words)
     return highlighted_passage
+
+# ------------------------ Main Pipeline ------------------------
+
 
 # ------------------------ Main Pipeline ------------------------
 
@@ -622,6 +678,11 @@ def main():
                 print(f"\nQuery: {query}")
                 # Encode the query into an embedding
                 query_embedding = model.encode([query], convert_to_tensor=False)[0]
+                # Ensure the query embedding is on CPU
+                if hasattr(query_embedding, 'cpu'):
+                    query_embedding = query_embedding.cpu().numpy()
+                else:
+                    query_embedding = np.array(query_embedding)
 
                 # Perform similarity search in Qdrant
                 similar_passages = perform_similarity_search(
@@ -637,8 +698,14 @@ def main():
                     print("\nTop 3 similar passages:")
                     # Loop through each similar passage
                     for idx, passage in enumerate(similar_passages, 1):
-                        # Highlight similar text using the model
-                        highlighted_passage = highlight_similar_text_using_model(query, passage['passage'], model, threshold=0.6)
+                        # Highlight similar text using the model and stopwords
+                        highlighted_passage = highlight_similar_text_using_model(
+                            query,
+                            passage['passage'],
+                            model,
+                            greek_stopwords,
+                            threshold=0.7  # Increased threshold
+                        )
 
                         # Write to the HTML report
                         report_file.write(f'<li>')
