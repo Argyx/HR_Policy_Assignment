@@ -32,5 +32,10 @@ reports/
 *.png
 *.html
 
-# Do not ignore files in the sample_output directory
+# Do not ignore any files in the sample_output directory, even if they match previous rules
 !sample_output/
+!sample_output/*.csv
+!sample_output/*.tsv
+!sample_output/*.xlsx
+!sample_output/*.png
+!sample_output/*.html
