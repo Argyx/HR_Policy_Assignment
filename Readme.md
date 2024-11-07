@@ -236,4 +236,3 @@ This project is licensed under the [MIT License](https://opensource.org/licenses
 - [Kneed](https://github.com/arvkevi/kneed) for elbow method detection.
 - [Scikit-learn](https://scikit-learn.org/) for clustering and evaluation metrics.
 - [Matplotlib](https://matplotlib.org/) and [Seaborn](https://seaborn.pydata.org/) for data visualization.
-git 
