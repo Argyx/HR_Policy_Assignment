@@ -31,3 +31,6 @@ output/
 reports/
 *.png
 *.html
+
+# Do not ignore files in the sample_output directory
+!sample_output/
